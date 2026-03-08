@@ -1,0 +1,12 @@
+version: "3.8"
+
+# 仅用于构建业务 Shiny 镜像（app.R）
+# 用法：docker compose -f docker-compose.shiny.yml build
+
+services:
+  shiny-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ivd_shiny:20260305
+

@@ -1,0 +1,7 @@
+services:
+  auth-shiny-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.login
+    image: ivd_auth_shiny:20260305
+
