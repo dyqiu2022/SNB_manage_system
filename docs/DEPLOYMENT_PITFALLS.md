@@ -236,6 +236,8 @@ docker run --rm -e PGPASSWORD=mypassword -e PGCLIENTENCODING=UTF8 -v C:\IVD_Proj
 docker compose -f docker-compose.login.yml build
 docker save ivd_auth_shiny:20260305 -o ivd_auth_shiny.tar
 cp ~/shiny_project/ivd_auth_shiny.tar /mnt/c/IVD_Project/
+
+docker load -i ivd_auth_shiny.tar; docker compose up -d; docker restart ivd_gateway
 ```
 
 **业务 Shiny 镜像（甘特图 app.R）：**
@@ -244,6 +246,8 @@ cp ~/shiny_project/ivd_auth_shiny.tar /mnt/c/IVD_Project/
 docker compose -f docker-compose.shiny.yml build
 docker save ivd_shiny:20260305 -o ivd_shiny.tar
 cp ~/shiny_project/ivd_shiny.tar /mnt/c/IVD_Project/
+
+docker load -i ivd_shiny.tar; docker compose up -d; docker restart ivd_gateway
 ```
 
 若当前不在 `~/shiny_project`，把 `cp` 里的路径改成项目实际路径；`/mnt/c/IVD_Project/` 换成你要放 tar 的 Windows 目录。在目标环境用 `docker load -i ivd_auth_shiny.tar` 或 `docker load -i ivd_shiny.tar` 导入即可。
