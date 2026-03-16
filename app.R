@@ -1375,9 +1375,10 @@ server <- function(input, output, session) {
   }
 
   stage_label_for_key <- function(stage_key) {
-    lbl <- stage_catalog()$task_short_name[[stage_key]]
-    if (!is.null(lbl) && !is.na(lbl) && nzchar(lbl)) return(lbl)
-    sub("^S\\d+_?", "", stage_key)
+    nms <- stage_catalog()$task_short_name
+    lbl <- if (length(stage_key) != 1) NA_character_ else nms[names(nms) == stage_key][1]
+    if (!is.null(lbl) && !is.na(lbl) && nzchar(lbl)) return(as.character(lbl))
+    sub("^S\\d+_?", "", as.character(stage_key %||% ""))
   }
 
   stage_config_for <- function(stage_key, project_type = NA_character_) {
@@ -2197,9 +2198,9 @@ server <- function(input, output, session) {
     if (nrow(gd_milestone) > 0) {
       cur_ms_id <- if (nrow(items_data) > 0) max(items_data$id, na.rm = TRUE) + 1L else 1L
       seen_sync_stage <- character(0)
-      sync_with_ms <- character(0)
-      site_with_ms <- character(0)
-
+        sync_with_ms <- character(0)
+        site_with_ms <- character(0)
+        
       for (ri in seq_len(nrow(gd_milestone))) {
         row <- gd_milestone[ri, ]
           pid <- row$project_id
@@ -2262,14 +2263,14 @@ server <- function(input, output, session) {
               }
             }
           }
-        if (this_stage_has_ms) {
-          if (is_sync_row) {
-            sync_with_ms <- union(sync_with_ms, as.character(pid))
-          } else {
-            site_with_ms <- union(site_with_ms, paste(pid, sname, sep = "||"))
+          if (this_stage_has_ms) {
+            if (is_sync_row) {
+              sync_with_ms <- union(sync_with_ms, as.character(pid))
+            } else {
+              site_with_ms <- union(site_with_ms, paste(pid, sname, sep = "||"))
+            }
           }
         }
-      }
 
       # 每个子进程（每组）仅一个「自定义里程碑」入口，跟在最后一个阶段后面；本组已有里程碑则不显示占位
       if ("stage_ord" %in% names(gd_milestone)) {
@@ -2293,56 +2294,56 @@ server <- function(input, output, session) {
           group_by(project_id, site_name) %>%
           summarise(last_task_name = task_name[which.max(ord)[1]], .groups = "drop")
       }
-      for (k in seq_len(nrow(last_sync_stage))) {
-        lp <- last_sync_stage$project_id[k]
-        last_task <- last_sync_stage$last_task_name[k]
-        if (lp %in% sync_with_ms) next
+          for (k in seq_len(nrow(last_sync_stage))) {
+            lp <- last_sync_stage$project_id[k]
+            last_task <- last_sync_stage$last_task_name[k]
+            if (lp %in% sync_with_ms) next
         idx <- which(gd_milestone$project_id == lp & gd_milestone$task_name == last_task & gd_milestone$task_name %in% ss)[1]
-        if (is.na(idx)) next
+            if (is.na(idx)) next
         row_k <- gd_milestone[idx, ]
         end_date <- row_k$actual_end_date
         if (is.na(end_date) || is.null(end_date)) end_date <- row_k$planned_end_date
         if (is.na(end_date) || is.null(end_date)) end_date <- today
-        milestone_items[[length(milestone_items) + 1]] <- data.frame(
-          id = cur_ms_id,
+            milestone_items[[length(milestone_items) + 1]] <- data.frame(
+              id = cur_ms_id,
           group = paste0(lp, "_同步阶段"),
-          start = as.character(end_date),
-          end = NA,
-          content = "自定义里程碑",
-          style = "color:#37474F; border-color:#78909C; background-color:#ECEFF1;",
-          type = "point",
-          milestone_name = NA_character_,
-          milestone_kind = "placeholder",
+              start = as.character(end_date),
+              end = NA,
+              content = "自定义里程碑",
+              style = "color:#37474F; border-color:#78909C; background-color:#ECEFF1;",
+              type = "point",
+              milestone_name = NA_character_,
+              milestone_kind = "placeholder",
           milestone_stage_key = as.character(last_task),
-          stringsAsFactors = FALSE
-        )
-        cur_ms_id <- cur_ms_id + 1L
-      }
-      for (k in seq_len(nrow(last_site_stage))) {
-        lp <- last_site_stage$project_id[k]
-        ls <- last_site_stage$site_name[k]
-        last_task <- last_site_stage$last_task_name[k]
+              stringsAsFactors = FALSE
+            )
+            cur_ms_id <- cur_ms_id + 1L
+          }
+          for (k in seq_len(nrow(last_site_stage))) {
+            lp <- last_site_stage$project_id[k]
+            ls <- last_site_stage$site_name[k]
+            last_task <- last_site_stage$last_task_name[k]
         if (paste(lp, ls, sep = "||") %in% site_with_ms) next
         idx <- which(gd_milestone$project_id == lp & gd_milestone$site_name == ls & gd_milestone$task_name == last_task & gd_milestone$task_name %in% site_stage_keys)[1]
-        if (is.na(idx)) next
+            if (is.na(idx)) next
         row_k <- gd_milestone[idx, ]
         end_date <- row_k$actual_end_date
         if (is.na(end_date) || is.null(end_date)) end_date <- row_k$planned_end_date
         if (is.na(end_date) || is.null(end_date)) end_date <- today
-        milestone_items[[length(milestone_items) + 1]] <- data.frame(
-          id = cur_ms_id,
+            milestone_items[[length(milestone_items) + 1]] <- data.frame(
+              id = cur_ms_id,
           group = paste0(lp, "_", ls),
-          start = as.character(end_date),
-          end = NA,
-          content = "自定义里程碑",
-          style = "color:#37474F; border-color:#78909C; background-color:#ECEFF1;",
-          type = "point",
-          milestone_name = NA_character_,
-          milestone_kind = "placeholder",
+              start = as.character(end_date),
+              end = NA,
+              content = "自定义里程碑",
+              style = "color:#37474F; border-color:#78909C; background-color:#ECEFF1;",
+              type = "point",
+              milestone_name = NA_character_,
+              milestone_kind = "placeholder",
           milestone_stage_key = as.character(last_task),
-          stringsAsFactors = FALSE
-        )
-        cur_ms_id <- cur_ms_id + 1L
+              stringsAsFactors = FALSE
+            )
+            cur_ms_id <- cur_ms_id + 1L
       }
     }
 
@@ -3021,10 +3022,9 @@ server <- function(input, output, session) {
                   class = "panel-body",
                   fluidRow(column(12, tags$label("stage_key"), tags$p(style = "margin-top: 4px; font-weight: bold;", row$stage_key))),
                   fluidRow(
-                    column(3, textInput(paste0(sid, "_name"), "阶段名称", value = row$stage_name, width = "100%")),
+                    column(4, textInput(paste0(sid, "_name"), "阶段名称", value = row$stage_name, width = "100%")),
                     column(2, numericInput(paste0(sid, "_order"), "排序", value = as.integer(row$stage_order), min = 0, step = 1, width = "100%")),
                     column(2, selectInput(paste0(sid, "_scope"), "scope", choices = c("sync", "site"), selected = row$stage_scope, width = "100%")),
-                    column(2, tags$div(style = "margin-top: 25px;", checkboxInput(paste0(sid, "_sample"), "样本", value = isTRUE(row$supports_sample)))),
                     column(2, tags$div(style = "margin-top: 25px;", checkboxInput(paste0(sid, "_active"), "模板启用", value = isTRUE(row$is_active))))
                   ),
                   fluidRow(
@@ -3054,7 +3054,7 @@ server <- function(input, output, session) {
         nm <- input[[paste0(sid, "_name")]]
         ord <- input[[paste0(sid, "_order")]]
         sc <- input[[paste0(sid, "_scope")]]
-        samp <- isTRUE(input[[paste0(sid, "_sample")]])
+        samp <- identical(as.character(df$stage_key[i]), "S09_验证试验开展与数据管理")
         act <- isTRUE(input[[paste0(sid, "_active")]])
         cfg <- input[[paste0(sid, "_config")]]
         if (is.null(nm) && is.null(ord) && is.null(sc) && is.null(cfg)) next
@@ -3093,8 +3093,7 @@ server <- function(input, output, session) {
       fluidRow(
         column(4, numericInput("new_stage_order", "排序", value = 99, min = 0, step = 1, width = "100%")),
         column(4, selectInput("new_stage_scope", "scope", choices = c("sync", "site"), selected = "site", width = "100%")),
-        column(2, tags$div(style = "margin-top: 25px;", checkboxInput("new_stage_sample", "样本", value = FALSE))),
-        column(2, tags$div(style = "margin-top: 25px;", checkboxInput("new_stage_active", "模板启用", value = TRUE)))
+        column(4, tags$div(style = "margin-top: 25px;", checkboxInput("new_stage_active", "模板启用", value = TRUE)))
       ),
       fluidRow(
         column(12, textAreaInput("new_stage_config", "stage_config (JSON)", value = "{}", rows = 4, width = "100%", placeholder = '{"work_choices":["选项1","选项2"]}'))
@@ -3124,7 +3123,7 @@ server <- function(input, output, session) {
       ins <- 'INSERT INTO public."08项目阶段定义表" (project_type, stage_key, stage_name, stage_scope, stage_order, supports_sample, is_active, stage_config) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING id'
       res <- DBI::dbGetQuery(pg_con, ins, params = list(
         pt, k, nm %||% k, input$new_stage_scope, as.integer(input$new_stage_order %||% 99),
-        isTRUE(input$new_stage_sample), isTRUE(input$new_stage_active), cfg
+        identical(k, "S09_验证试验开展与数据管理"), isTRUE(input$new_stage_active), cfg
       ))
       new_def_id <- res$id[1]
       sc <- input$new_stage_scope
@@ -3508,12 +3507,15 @@ server <- function(input, output, session) {
           showNotification(sprintf("不存在此人名：%s", p), type = "error")
           return()
         }
-        if (!nzchar(p)) next
         raw_num <- tryCatch(input[[paste0("contrib_amount_", i)]], error = function(e) NA_real_)
         amt_num <- suppressWarnings(as.numeric(raw_num))
+        if (nzchar(p)) {
         if (is.na(amt_num) || amt_num < 1) {
           showNotification("数量必须为不小于 1 的数字。", type = "error")
           return()
+          }
+        } else {
+          amt_num <- 1
         }
         entry_key_i <- if (nrow(contrib_df) >= i) as.character(contrib_df$entry_key[i]) else ""
         if (i <= nrow(contrib_df)) {
@@ -3944,7 +3946,7 @@ server <- function(input, output, session) {
       removeModal()
       if (length(result$partial_conflicts %||% list()) > 0) {
         if (identical(save_mode, "partial")) {
-          showNotification(sprintf("里程碑已保存，%d 项冲突内容未覆盖。", length(result$partial_conflicts)), type = "warning")
+        showNotification(sprintf("里程碑已保存，%d 项冲突内容未覆盖。", length(result$partial_conflicts)), type = "warning")
         } else if (identical(save_mode, "overwrite")) {
           showNotification(sprintf("里程碑已保存，已覆盖 %d 项冲突内容。", length(result$partial_conflicts)), type = "message")
         } else {
