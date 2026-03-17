@@ -1,5 +1,5 @@
 -- 与 v_项目阶段甘特视图 结构相同，但不过滤 09.is_active，用于自由里程碑展示（含未激活阶段）
--- 应用层仍会加上 project_id / project_type / 权限 等条件
+-- 同时适配 09 表新增的 planned_start_date / actual_start_date
 
 CREATE OR REPLACE VIEW public."v_项目阶段甘特视图_全部" AS
 SELECT
@@ -20,11 +20,13 @@ SELECT
   d.stage_order AS stage_ord,
   d.stage_scope,
   'Process'::text AS task_type,
-  si.start_date,
+  si.planned_start_date,
+  si.actual_start_date,
+  COALESCE(si.actual_start_date, si.planned_start_date) AS start_date,
   si.planned_end_date,
   si.actual_end_date,
   COALESCE(si.progress, 0)::numeric / 100.0 AS progress,
-  (si.start_date IS NULL OR si.planned_end_date IS NULL) AS is_unplanned,
+  (COALESCE(si.actual_start_date, si.planned_start_date) IS NULL OR si.planned_end_date IS NULL) AS is_unplanned,
   si.remark_json::text AS remark,
   si.remark_json,
   si.contributors_json,

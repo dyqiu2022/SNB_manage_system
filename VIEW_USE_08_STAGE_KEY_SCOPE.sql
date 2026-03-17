@@ -1,5 +1,6 @@
 -- 先修改视图，改为从 08 表取 stage_key、stage_scope，解除对 09 表这两列的依赖
 -- 执行本脚本后，即可在 09 表上安全删除 stage_key、stage_scope 列
+-- 同时适配 09 表新增的 planned_start_date / actual_start_date，废弃 start_date 列
 
 DROP VIEW IF EXISTS public."v_项目阶段甘特视图";
 
@@ -22,11 +23,14 @@ SELECT
   d.stage_order AS stage_ord,
   d.stage_scope,
   'Process'::text AS task_type,
-  si.start_date,
+  si.planned_start_date,
+  si.actual_start_date,
+  -- 有效开始日期：实际开始优先，未填则用计划开始
+  COALESCE(si.actual_start_date, si.planned_start_date) AS start_date,
   si.planned_end_date,
   si.actual_end_date,
   COALESCE(si.progress, 0)::numeric / 100.0 AS progress,
-  (si.start_date IS NULL OR si.planned_end_date IS NULL) AS is_unplanned,
+  (COALESCE(si.actual_start_date, si.planned_start_date) IS NULL OR si.planned_end_date IS NULL) AS is_unplanned,
   si.remark_json::text AS remark,
   si.remark_json,
   si.contributors_json,

@@ -1651,6 +1651,9 @@ server <- function(input, output, session) {
       }
       if (nrow(stage_rows) == 0) return(stage_rows)
       stage_rows <- as_tibble(stage_rows)
+      stage_rows$planned_start_date <- as.Date(stage_rows$planned_start_date)
+      stage_rows$actual_start_date  <- as.Date(stage_rows$actual_start_date)
+      # start_date 已由视图计算为 COALESCE(actual_start_date, planned_start_date)
       stage_rows$start_date <- as.Date(stage_rows$start_date)
       stage_rows$planned_end_date <- as.Date(stage_rows$planned_end_date)
       stage_rows$actual_end_date <- as.Date(stage_rows$actual_end_date)
@@ -1672,7 +1675,9 @@ server <- function(input, output, session) {
         sync_expanded <- sync_rows
       }
       df <- bind_rows(sync_expanded, site_rows) %>% arrange(project_id, site_name, stage_ord)
-      df$raw_start_date <- df$start_date
+      df$raw_planned_start_date <- df$planned_start_date
+      df$raw_actual_start_date  <- df$actual_start_date
+      df$raw_start_date <- df$start_date           # 有效开始（coalesce）
       df$raw_planned_end_date <- df$planned_end_date
       cur_proj <- ""
       cur_site <- ""
@@ -1796,6 +1801,8 @@ server <- function(input, output, session) {
       }
       if (nrow(stage_rows) == 0) return(stage_rows)
       stage_rows <- as_tibble(stage_rows)
+      stage_rows$planned_start_date <- as.Date(stage_rows$planned_start_date)
+      stage_rows$actual_start_date  <- as.Date(stage_rows$actual_start_date)
       stage_rows$start_date <- as.Date(stage_rows$start_date)
       stage_rows$planned_end_date <- as.Date(stage_rows$planned_end_date)
       stage_rows$actual_end_date <- as.Date(stage_rows$actual_end_date)
@@ -1817,6 +1824,8 @@ server <- function(input, output, session) {
         sync_expanded <- sync_rows
       }
       df <- bind_rows(sync_expanded, site_rows) %>% arrange(project_id, site_name, stage_ord)
+      df$raw_planned_start_date <- df$planned_start_date
+      df$raw_actual_start_date  <- df$actual_start_date
       df$raw_start_date <- df$start_date
       df$raw_planned_end_date <- df$planned_end_date
       cur_proj <- ""
@@ -1966,33 +1975,21 @@ server <- function(input, output, session) {
         id = row_number(),
         group = paste0(project_id, "_", site_name),
         
-        # 计算理论计划进度
-        # 理论计划进度仅在任务实际完成的时候停止增长
-        # 如果任务没完成就一直增长，可以超过100%
-        # 如果任务提前完成就停在不到100%的地方
-        planned_duration = as.numeric(planned_end_date - start_date),
-        # 判断任务是否已完成：必须有 actual_end_date 才视为已完成
+        # 分母：计划周期 = 计划结束 - 计划开始（固定基准）
+        planned_duration = as.numeric(planned_end_date - planned_start_date),
         is_completed = !is.na(actual_end_date),
+        # 分子：实际周期 = (实际结束 或 今天) - 实际开始（actual_start 有则用，否则退回 planned_start）
+        # start_date = COALESCE(actual_start_date, planned_start_date)，正好满足此逻辑
         planned_progress = ifelse(
           is_completed,
-          # 已完成：如果有actual_end_date，使用actual_end_date计算；否则使用planned_end_date计算
-          ifelse(
-            !is.na(actual_end_date),
-            # 有actual_end_date：理论计划进度停在actual_end_date对应的计划进度
             ifelse(planned_duration > 0,
                    as.numeric(actual_end_date - start_date) / planned_duration,
                    1.0),
-            # 没有actual_end_date但progress=1.0：使用planned_end_date计算（假设按计划完成）
-            ifelse(planned_duration > 0, 1.0, 1.0)
-          ),
-          # 未完成：理论计划进度一直增长，可以超过100%
           ifelse(planned_duration > 0,
                  as.numeric(today - start_date) / planned_duration,
                  ifelse(today >= start_date, 1.0, 0.0))
         ),
-        # 实际完成度：已完成任务为1.0，未完成任务为progress（0-1之间）
         actual_progress = ifelse(is_completed, 1.0, progress),
-        # 颜色用数值差额计算：实际完成度 - 理论计划进度
         progress_diff = actual_progress - planned_progress,
 
         # 7级颜色分类（红黄绿渐变）
@@ -2060,6 +2057,7 @@ server <- function(input, output, session) {
       group_by(project_id, task_name) %>%
       summarise(
         start_date = first(start_date),
+        planned_start_date = first(planned_start_date),
         planned_end_date = first(planned_end_date),
         actual_end_date = first(actual_end_date),
         progress = first(progress),
@@ -2068,33 +2066,23 @@ server <- function(input, output, session) {
         .groups = 'drop'
       ) %>%
       mutate(
-        id = max(items_centers$id, 0) + row_number(),  # 确保ID不重复
+        id = max(items_centers$id, 0) + row_number(),
         group = paste0(project_id, "_同步阶段"),
         
-        # 计算理论计划进度（与items_centers相同的逻辑）
-        planned_duration = as.numeric(planned_end_date - start_date),
-        # 判断任务是否已完成：必须有 actual_end_date 才视为已完成
+        # 分母：计划周期 = 计划结束 - 计划开始（固定基准）
+        planned_duration = as.numeric(planned_end_date - planned_start_date),
         is_completed = !is.na(actual_end_date),
+        # 分子：start_date = COALESCE(actual_start_date, planned_start_date)
         planned_progress = ifelse(
           is_completed,
-          # 已完成：如果有actual_end_date，使用actual_end_date计算；否则使用planned_end_date计算
-          ifelse(
-            !is.na(actual_end_date),
-            # 有actual_end_date：理论计划进度停在actual_end_date对应的计划进度
             ifelse(planned_duration > 0,
                    as.numeric(actual_end_date - start_date) / planned_duration,
                    1.0),
-            # 没有actual_end_date但progress=1.0：使用planned_end_date计算（假设按计划完成）
-            ifelse(planned_duration > 0, 1.0, 1.0)
-          ),
-          # 未完成：理论计划进度一直增长，可以超过100%
           ifelse(planned_duration > 0,
                  as.numeric(today - start_date) / planned_duration,
                  ifelse(today >= start_date, 1.0, 0.0))
         ),
-        # 实际完成度：已完成任务为1.0，未完成任务为progress（0-1之间）
         actual_progress = ifelse(is_completed, 1.0, progress),
-        # 颜色用数值差额计算：实际完成度 - 理论计划进度
         progress_diff = actual_progress - planned_progress,
         
         # 7级颜色分类（红黄绿渐变）
@@ -2527,12 +2515,14 @@ server <- function(input, output, session) {
     is_completed <- !is.na(actual_end_date)
     actual_progress <- ifelse(is_completed, 1.0, reported_progress)
     
-    raw_start <- if ("raw_start_date" %in% names(original_task)) original_task$raw_start_date[1] else (if (is_unplanned) as.Date(NA) else start_for_calc)
+    raw_planned_start <- if ("raw_planned_start_date" %in% names(original_task)) original_task$raw_planned_start_date[1] else (if (is_unplanned) as.Date(NA) else start_for_calc)
+    raw_actual_start  <- if ("raw_actual_start_date"  %in% names(original_task)) original_task$raw_actual_start_date[1]  else as.Date(NA)
     raw_planned <- if ("raw_planned_end_date" %in% names(original_task)) original_task$raw_planned_end_date[1] else (if (is_unplanned) as.Date(NA) else planned_end_date)
     tn <- as.character(task_info$task_name[1])
     stage_instance_id <- if ("stage_instance_id" %in% names(original_task)) original_task$stage_instance_id[1] else NA_integer_
     cm <- list(
-      start = "start_date",
+      planned_start = "planned_start_date",
+      actual_start  = "actual_start_date",
       plan = "planned_end_date",
       act = "actual_end_date",
       note = "remark_json",
@@ -2543,7 +2533,7 @@ server <- function(input, output, session) {
     tbl_main <- "09项目阶段实例表"
     row_id_main <- stage_instance_id
 
-    snapshot_cols <- c("start_date", "planned_end_date", "actual_end_date", "remark_json", "progress", "contributors_json", "milestones_json", "sample_json", "row_version")
+    snapshot_cols <- c("planned_start_date", "actual_start_date", "planned_end_date", "actual_end_date", "remark_json", "progress", "contributors_json", "milestones_json", "sample_json", "row_version")
     is_s09_task <- identical(as.character(task_info$task_name[1]), "S09_验证试验开展与数据管理") && is_sync
     snapshot_row <- if (!is.na(row_id_main) && !is.null(pg_con) && DBI::dbIsValid(pg_con)) {
       tryCatch(fetch_row_snapshot(pg_con, tbl_main, row_id_main, snapshot_cols, lock = FALSE), error = function(e) NULL)
@@ -2588,7 +2578,8 @@ server <- function(input, output, session) {
         is_sync = is_sync,
         project_type = if ("project_type" %in% names(original_task)) original_task$project_type[1] else NA_character_,
         importance = if ("重要紧急程度" %in% names(original_task)) as.character(original_task[["重要紧急程度"]][1]) else NA_character_,
-        start_date = raw_start,
+        planned_start_date = raw_planned_start,
+        actual_start_date  = raw_actual_start,
         planned_end_date = raw_planned,
         actual_end_date = actual_end_date,
         progress = actual_progress,
@@ -2613,20 +2604,19 @@ server <- function(input, output, session) {
       task_edit_context(NULL)
     }
     
-    # 计算计划总时长：严格按照计划开始/结束日期
-    planned_duration <- as.numeric(planned_end_date - start_for_calc)
-    
-    # 计算理论计划进度：
-    # - 已完成：理论计划进度停在 actual_end_date 对应的计划进度（可早可晚）
-    # - 未完成：按 today 相对于计划结束时间的比例来计算，可以超过 100%
+    # 分母：计划周期 = 计划结束 - 计划开始（固定基准）
+    planned_duration <- as.numeric(planned_end_date - raw_planned_start)
+    # 分子起点：实际开始有则用，否则退回计划开始
+    eff_start_detail <- if (!is.na(raw_actual_start)) raw_actual_start else raw_planned_start
+    # 理论计划进度 = 实际周期 / 计划周期
     planned_p <- ifelse(
       is_completed,
       ifelse(planned_duration > 0,
-             as.numeric(actual_end_date - start_for_calc) / planned_duration,
+             as.numeric(actual_end_date - eff_start_detail) / planned_duration,
              1.0),
       ifelse(planned_duration > 0,
-             as.numeric(today - start_for_calc) / planned_duration,
-             ifelse(today >= start_for_calc, 1.0, 0.0))
+             as.numeric(today - eff_start_detail) / planned_duration,
+             ifelse(!is.na(eff_start_detail) && today >= eff_start_detail, 1.0, 0.0))
     )
     
     # 计划/实际完成日期差异（仅在有 actual_end_date 时计算）
@@ -2750,7 +2740,8 @@ server <- function(input, output, session) {
                  if (length(participants_display) > 0)
                    tags$div(style = "white-space: pre-wrap; margin-top: 4px;", paste(participants_display, collapse = "\n"))
                  else tags$span("（无）", style = "color: #999;")),
-               p(tags$b("开始日期："), if (length(raw_start) > 0 && !is.na(raw_start)) as.character(raw_start) else "无"),
+               p(tags$b("计划开始日期："), if (length(raw_planned_start) > 0 && !is.na(raw_planned_start)) as.character(raw_planned_start) else "无"),
+               p(tags$b("实际开始日期："), if (length(raw_actual_start) > 0 && !is.na(raw_actual_start)) as.character(raw_actual_start) else "无"),
                p(tags$b("计划结束日期："), if (length(raw_planned) > 0 && !is.na(raw_planned)) as.character(raw_planned) else "无"),
                p(tags$b("实际结束日期："), if (length(actual_end_date) > 0 && !is.na(actual_end_date)) as.character(actual_end_date) else "无"),
                p(tags$b("提前/延后："),
@@ -2854,7 +2845,8 @@ server <- function(input, output, session) {
   open_task_edit_modal <- function(ctx) {
     req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
     removeModal()
-    sd <- ctx$start_date
+    psd <- ctx$planned_start_date
+    asd <- ctx$actual_start_date
     pd <- ctx$planned_end_date
     ad <- ctx$actual_end_date
     proj_type <- ctx$project_type
@@ -2909,10 +2901,11 @@ server <- function(input, output, session) {
             p(tags$b("实际结束日期："), prev_act)
           ),
           p(tags$span(stage_label_for_key(ctx$task_name), style = "color: #1976D2; font-weight: bold;")),
-          textInput("edit_start_date", "开始日期：", value = if (length(sd) > 0 && !is.na(sd)) format(sd, "%Y-%m-%d") else "", placeholder = "YYYY-MM-DD，留空表示未制定计划"),
+          textInput("edit_planned_start_date", "计划开始日期：", value = if (length(psd) > 0 && !is.na(psd)) format(psd, "%Y-%m-%d") else "", placeholder = "YYYY-MM-DD，留空表示未制定计划"),
+          textInput("edit_actual_start_date",  "实际开始日期：", value = if (length(asd) > 0 && !is.na(asd)) format(asd, "%Y-%m-%d") else "", placeholder = "YYYY-MM-DD，已开始则填写，优先用于位置与色彩计算"),
           textInput("edit_planned_date", "计划结束日期：", value = if (length(pd) > 0 && !is.na(pd)) format(pd, "%Y-%m-%d") else "", placeholder = "YYYY-MM-DD，留空表示未制定计划"),
           textInput("edit_actual_date", "实际结束日期：", value = if (length(ad) > 0 && !is.na(ad)) format(ad, "%Y-%m-%d") else "", placeholder = "YYYY-MM-DD，留空表示未完成"),
-          tags$p(tags$small("（日期格式：YYYY-MM-DD；留空表示未制定计划/未完成）")),
+          tags$p(tags$small("（日期格式：YYYY-MM-DD；实际开始日期已填时优先参与甘特位置与色彩计算）")),
           sliderInput("edit_progress", "调整当前实际进度：", 0, 100, round((if (is.null(ctx$progress)) 0 else ctx$progress) * 100), post = "%")
         ),
         column(6,
@@ -2931,7 +2924,7 @@ server <- function(input, output, session) {
   }
 
   refresh_task_context_from_db <- function(ctx) {
-    main_cols <- c(ctx$col_map$start, ctx$col_map$plan, ctx$col_map$act, ctx$col_map$note, ctx$col_map$progress)
+    main_cols <- c(ctx$col_map$planned_start, ctx$col_map$actual_start, ctx$col_map$plan, ctx$col_map$act, ctx$col_map$note, ctx$col_map$progress)
     if (identical(ctx$task_name, "S09_验证试验开展与数据管理") && ctx$is_sync) {
       main_cols <- c(main_cols, "sample_json")
     }
@@ -2942,7 +2935,8 @@ server <- function(input, output, session) {
       ctx$snapshot_project_row <- fetch_row_snapshot(pg_con, "04项目总表", ctx$proj_row_id, "重要紧急程度", lock = FALSE)
       if (!is.null(ctx$snapshot_project_row)) ctx$importance <- ctx$snapshot_project_row[["重要紧急程度"]]
     }
-    ctx$start_date <- suppressWarnings(as.Date(latest_row[[ctx$col_map$start]]))
+    ctx$planned_start_date <- suppressWarnings(as.Date(latest_row[[ctx$col_map$planned_start]]))
+    ctx$actual_start_date  <- suppressWarnings(as.Date(latest_row[[ctx$col_map$actual_start]]))
     ctx$planned_end_date <- suppressWarnings(as.Date(latest_row[[ctx$col_map$plan]]))
     ctx$actual_end_date <- suppressWarnings(as.Date(latest_row[[ctx$col_map$act]]))
     ctx$progress <- suppressWarnings(as.numeric(latest_row[[ctx$col_map$progress]]) / 100)
@@ -4098,19 +4092,21 @@ server <- function(input, output, session) {
       if (is.na(d)) return(list(ok = FALSE, value = NA))
       list(ok = TRUE, value = d)
     }
-    sd_res <- validate_date_input(input$edit_start_date)
-    pd_res <- validate_date_input(input$edit_planned_date)
-    ad_res <- validate_date_input(input$edit_actual_date)
-    if (!sd_res$ok || !pd_res$ok || !ad_res$ok) {
+    psd_res <- validate_date_input(input$edit_planned_start_date)
+    asd_res <- validate_date_input(input$edit_actual_start_date)
+    pd_res  <- validate_date_input(input$edit_planned_date)
+    ad_res  <- validate_date_input(input$edit_actual_date)
+    if (!psd_res$ok || !asd_res$ok || !pd_res$ok || !ad_res$ok) {
       showNotification("日期格式错误或不存在", type = "error")
       return()
     }
-    sd_val <- sd_res$value
-    pd_val <- pd_res$value
-    ad_val <- ad_res$value
-    # 业务校验：对于普通阶段，如果计划结束日期早于开始日期，则阻止写入
-    # 仅当两者都不为空时才做比较
-    if (!is.na(sd_val) && !is.na(pd_val) && pd_val < sd_val) {
+    psd_val <- psd_res$value
+    asd_val <- asd_res$value
+    pd_val  <- pd_res$value
+    ad_val  <- ad_res$value
+    # 业务校验：计划结束日期不能早于有效开始日期（实际开始优先）
+    eff_start <- if (!is.na(asd_val)) asd_val else psd_val
+    if (!is.na(eff_start) && !is.na(pd_val) && pd_val < eff_start) {
       showNotification("计划结束日期不能早于开始日期，请检查后重新填写。", type = "error")
       return()
     }
@@ -4181,7 +4177,7 @@ server <- function(input, output, session) {
     progress_num <- suppressWarnings(as.numeric(progress_val))
     if (is.na(progress_num)) progress_num <- 0
     progress_num <- pmax(0, pmin(100, progress_num))
-    main_cols <- c(cm$start, cm$plan, cm$act, cm$note, cm$progress)
+    main_cols <- c(cm$planned_start, cm$actual_start, cm$plan, cm$act, cm$note, cm$progress)
     if (is_s09_task) main_cols <- c(main_cols, sample_col)
     snapshot_main_row <- ctx$snapshot_row %||% list()
     snapshot_project_row <- ctx$snapshot_project_row %||% list()
@@ -4189,19 +4185,22 @@ server <- function(input, output, session) {
     snapshot_sample_map <- if (is_s09_task) parse_sample_map(snapshot_main_row[[sample_col]]) else list()
 
     user_main_row <- list()
-    user_main_row[[cm$start]] <- sd_val
+    user_main_row[[cm$planned_start]] <- psd_val
+    user_main_row[[cm$actual_start]]  <- asd_val
     user_main_row[[cm$plan]] <- pd_val
     user_main_row[[cm$act]] <- ad_val
     user_main_row[[cm$progress]] <- progress_num
     user_sample_map <- if (is_s09_task) build_sample_map_from_df(sample_df, actor = actor_name) else list()
 
     main_field_specs <- list(
-      list(col = cm$start, label = "开始时间", normalize = normalize_date_text),
-      list(col = cm$plan, label = "计划完成时间", normalize = normalize_date_text),
-      list(col = cm$act, label = "实际完成时间", normalize = normalize_date_text),
-      list(col = cm$progress, label = "当前进度", normalize = normalize_progress_text)
+      list(col = cm$planned_start, label = "计划开始时间", normalize = normalize_date_text),
+      list(col = cm$actual_start,  label = "实际开始时间", normalize = normalize_date_text),
+      list(col = cm$plan,          label = "计划完成时间", normalize = normalize_date_text),
+      list(col = cm$act,           label = "实际完成时间", normalize = normalize_date_text),
+      list(col = cm$progress,      label = "当前进度",     normalize = normalize_progress_text)
     )
-    ctx$start_date <- sd_val
+    ctx$planned_start_date <- psd_val
+    ctx$actual_start_date  <- asd_val
     ctx$planned_end_date <- pd_val
     ctx$actual_end_date <- ad_val
     ctx$progress <- progress_num / 100
@@ -4293,14 +4292,16 @@ server <- function(input, output, session) {
           }
 
           old_audit <- list(
-            开始时间 = locked_main_row[[cm$start]],
+            计划开始时间 = locked_main_row[[cm$planned_start]],
+            实际开始时间 = locked_main_row[[cm$actual_start]],
             计划完成时间 = locked_main_row[[cm$plan]],
             实际完成时间 = locked_main_row[[cm$act]],
             备注 = parse_named_json_map(locked_main_row[[ctx$note_col]]),
             当前进度 = locked_main_row[[cm$progress]]
           )
           new_audit <- list(
-            开始时间 = new_main_row[[cm$start]],
+            计划开始时间 = new_main_row[[cm$planned_start]],
+            实际开始时间 = new_main_row[[cm$actual_start]],
             计划完成时间 = new_main_row[[cm$plan]],
             实际完成时间 = new_main_row[[cm$act]],
             备注 = note_merge$merged,
@@ -4345,7 +4346,8 @@ server <- function(input, output, session) {
       if (!is.na(ctx$proj_row_id)) {
         ctx$snapshot_project_row <- tryCatch(fetch_row_snapshot(pg_con, "04项目总表", ctx$proj_row_id, "重要紧急程度", lock = FALSE), error = function(e) ctx$snapshot_project_row)
       }
-      ctx$start_date <- sd_val
+      ctx$planned_start_date <- psd_val
+      ctx$actual_start_date  <- asd_val
       ctx$planned_end_date <- pd_val
       ctx$actual_end_date <- ad_val
       ctx$progress <- progress_num / 100

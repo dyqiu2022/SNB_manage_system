@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict XNkcYhHo6WJrEMKF3JRcpeE2AmAbIFld1qg4jk9L2zazdoz1cagNU95ThyK25xH
+\restrict XA16VsSyCbGtjQqA0hUi3DB0g5XVxZVv1yIrEHVZqmSuJbBMbaW1Pco7W6TTzI8
 
 -- Dumped from database version 15.15 (Debian 15.15-1.pgdg13+1)
 -- Dumped by pg_dump version 15.15 (Debian 15.15-1.pgdg13+1)
@@ -64,16 +64,13 @@ CREATE FUNCTION public.ensure_project_stage_instances() RETURNS trigger
 DECLARE
   v_project_type text;
 BEGIN
-  IF NEW.is_active IS NOT TRUE THEN
-    RETURN NEW;
-  END IF;
-
   v_project_type := NEW."项目类型";
 
   IF v_project_type IS NULL OR v_project_type = '' THEN
     RETURN NEW;
   END IF;
 
+  -- 不论 08 是否 is_active，都创建 09 行；09.is_active 与 08.is_active 一致
   INSERT INTO public."09项目阶段实例表" (
     project_id,
     scope_row_id,
@@ -86,13 +83,12 @@ BEGIN
     0                   AS scope_row_id,
     NULL::integer       AS site_project_id,
     d.id                AS stage_def_id,
-    TRUE                AS is_active
+    COALESCE(d.is_active, TRUE) AS is_active
   FROM public."08项目阶段定义表" d
   WHERE d.project_type = v_project_type
     AND d.stage_scope = 'sync'
-    AND d.is_active = TRUE
   ON CONFLICT (project_id, stage_def_id, scope_row_id)
-  DO UPDATE SET is_active = TRUE;
+  DO UPDATE SET is_active = EXCLUDED.is_active;
 
   RETURN NEW;
 END;
@@ -122,6 +118,7 @@ BEGIN
   FROM public."04项目总表"
   WHERE id = v_project_id;
 
+  -- 仅当项目本身激活时才为该项目补全中心的 09 行（避免归档项目继续生成中心实例）
   IF v_proj_active IS NOT TRUE THEN
     RETURN NEW;
   END IF;
@@ -130,6 +127,7 @@ BEGIN
     RETURN NEW;
   END IF;
 
+  -- 不论 08 是否 is_active，都创建 09 行；09.is_active 与 08.is_active 一致
   INSERT INTO public."09项目阶段实例表" (
     project_id,
     scope_row_id,
@@ -142,13 +140,12 @@ BEGIN
     NEW.id              AS scope_row_id,
     NEW.id              AS site_project_id,
     d.id                AS stage_def_id,
-    TRUE                AS is_active
+    COALESCE(d.is_active, TRUE) AS is_active
   FROM public."08项目阶段定义表" d
   WHERE d.project_type = v_project_type
     AND d.stage_scope = 'site'
-    AND d.is_active = TRUE
   ON CONFLICT (project_id, stage_def_id, scope_row_id)
-  DO UPDATE SET is_active = TRUE;
+  DO UPDATE SET is_active = EXCLUDED.is_active;
 
   RETURN NEW;
 END;
@@ -532,7 +529,7 @@ CREATE TABLE public."09项目阶段实例表" (
     scope_row_id integer DEFAULT 0 NOT NULL,
     site_project_id integer,
     stage_def_id bigint NOT NULL,
-    start_date date,
+    planned_start_date date,
     planned_end_date date,
     actual_end_date date,
     progress integer DEFAULT 0 NOT NULL,
@@ -547,6 +544,7 @@ CREATE TABLE public."09项目阶段实例表" (
     updated_by_work_id text,
     updated_by_name text,
     is_active boolean,
+    actual_start_date date,
     CONSTRAINT "09项目阶段实例表_progress_check" CHECK (((progress >= 0) AND (progress <= 100)))
 );
 
@@ -2609,11 +2607,11 @@ CREATE VIEW public."v_项目阶段甘特视图" AS
     d.stage_order AS stage_ord,
     d.stage_scope,
     'Process'::text AS task_type,
-    si.start_date,
+    si.planned_start_date AS start_date,
     si.planned_end_date,
     si.actual_end_date,
     ((COALESCE(si.progress, 0))::numeric / 100.0) AS progress,
-    ((si.start_date IS NULL) OR (si.planned_end_date IS NULL)) AS is_unplanned,
+    ((si.planned_start_date IS NULL) OR (si.planned_end_date IS NULL)) AS is_unplanned,
     (si.remark_json)::text AS remark,
     si.remark_json,
     si.contributors_json,
@@ -5940,5 +5938,5 @@ ALTER TABLE ONLY public."03医院_项目表"
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XNkcYhHo6WJrEMKF3JRcpeE2AmAbIFld1qg4jk9L2zazdoz1cagNU95ThyK25xH
+\unrestrict XA16VsSyCbGtjQqA0hUi3DB0g5XVxZVv1yIrEHVZqmSuJbBMbaW1Pco7W6TTzI8
 
