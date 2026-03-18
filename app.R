@@ -40,7 +40,9 @@ onStop(function() {
 
 # ---------------- 1. 甘特图常量（与 DB 表结构对应） ----------------
 today <- Sys.Date()
-# 阶段全名 -> 短名（用于按项目类型过滤），已适配 S01-S15 新结构
+# ⚠️  以下常量（task_short_name / project_type_valid_stages / sync_stages_db / site_stages_db）
+# 仅作 DB 离线 fallback：正常运行时阶段数据全部来自 08 表（stage_definition_df reactive）。
+# 不要在此处维护阶段信息，请通过"阶段维护"界面直接修改 08 表。
 task_short_name <- c(
   "S01_需求与背景调研" = "需求与背景调研",
   "S02_方案设计审核" = "方案设计审核",
@@ -58,7 +60,7 @@ task_short_name <- c(
   "S14_文章内部审评、修改、投递" = "文章内部审评、修改、投递",
   "S15_意见反馈与文章返修" = "意见反馈与文章返修"
 )
-# 阶段全名按 S01-S15 的固定顺序（用于 stage_definition_df 等）
+# 阶段默认顺序（fallback only）
 default_stage_order_full <- names(task_short_name)
 # 项目类型 -> 有效阶段短名（不在清单中的阶段不显示），按用户提供的新阶段清单
 project_type_valid_stages <- list(
@@ -104,7 +106,7 @@ project_type_valid_stages <- list(
     "意见反馈与文章返修"
   )
 )
-# 同步阶段（项目级）：stage_definition_df 的 fallback，当 DB 不可用时
+# 同步阶段（项目级）— fallback only，DB 正常时不使用
 sync_stages_db <- c(
   "S01_需求与背景调研",
   "S02_方案设计审核",
@@ -117,7 +119,7 @@ sync_stages_db <- c(
   "S14_文章内部审评、修改、投递",
   "S15_意见反馈与文章返修"
 )
-# 分中心阶段（中心级）：stage_definition_df 的 fallback
+# 分中心阶段（中心级）— fallback only，DB 正常时不使用
 site_stages_db <- c(
   "S04_医院立项资料输出与递交",
   "S05_伦理审批与启动会",
@@ -1430,6 +1432,19 @@ server <- function(input, output, session) {
     )
   }
 
+  # 根据 stage_catalog（即 08 表）判断某阶段是否支持样本追踪
+  # 取代全代码中对 "S09_验证试验开展与数据管理" 的字符串硬判断
+  stage_supports_sample <- function(stage_key, project_type = NA_character_) {
+    defs <- stage_catalog()$defs
+    if (!is.na(project_type) && nzchar(project_type) && project_type %in% defs$project_type) {
+      row <- defs %>% filter(stage_key == !!stage_key, project_type == !!project_type) %>% slice(1)
+    } else {
+      row <- defs %>% filter(stage_key == !!stage_key) %>% slice(1)
+    }
+    if (nrow(row) == 0) return(FALSE)
+    isTRUE(row$supports_sample[1])
+  }
+
   # 筛选条件防抖，避免快速切换筛选时多次取消未完成的查询导致 “Closing open result set” 警告
   gantt_filter_state <- reactive({
     list(
@@ -2534,7 +2549,8 @@ server <- function(input, output, session) {
     row_id_main <- stage_instance_id
 
     snapshot_cols <- c("planned_start_date", "actual_start_date", "planned_end_date", "actual_end_date", "remark_json", "progress", "contributors_json", "milestones_json", "sample_json", "row_version")
-    is_s09_task <- identical(as.character(task_info$task_name[1]), "S09_验证试验开展与数据管理") && is_sync
+    pt_for_lookup <- if ("project_type" %in% names(original_task)) as.character(original_task$project_type[1]) else NA_character_
+    is_s09_task <- stage_supports_sample(as.character(task_info$task_name[1]), pt_for_lookup) && is_sync
     snapshot_row <- if (!is.na(row_id_main) && !is.null(pg_con) && DBI::dbIsValid(pg_con)) {
       tryCatch(fetch_row_snapshot(pg_con, tbl_main, row_id_main, snapshot_cols, lock = FALSE), error = function(e) NULL)
     } else {
@@ -2576,6 +2592,7 @@ server <- function(input, output, session) {
         site_name = task_info$site_name[1],
         task_name = tn,
         is_sync = is_sync,
+        supports_sample = is_s09_task,
         project_type = if ("project_type" %in% names(original_task)) original_task$project_type[1] else NA_character_,
         importance = if ("重要紧急程度" %in% names(original_task)) as.character(original_task[["重要紧急程度"]][1]) else NA_character_,
         planned_start_date = raw_planned_start,
@@ -2633,11 +2650,13 @@ server <- function(input, output, session) {
     # 是否为“已报完成但未填写实际完成日期”
     missing_actual_done <- is.na(actual_end_date) && reported_progress >= 1.0
     
-    diagnostic_text <- if (today < as.Date(task_info$start) && actual_progress == 0) {
+    diagnostic_text <- if (isTRUE(today < as.Date(task_info$start)) && isTRUE(actual_progress == 0)) {
       span("⏳ 尚未开始：未到计划启动时间。", style = "color: #757575; font-weight: bold;")
-    } else if (missing_actual_done) {
+    } else if (isTRUE(missing_actual_done)) {
       span("ℹ️ 已报完成，但未填写实际完成日期，请补充“实际完成时间”。", 
            style = "color: #1976D2; font-weight: bold;")
+    } else if (is.na(diff_p)) {
+      span("⏳ 尚未开始：计划日期未设置。", style = "color: #757575; font-weight: bold;")
     } else if(diff_p < -0.5) {
       span("❌ 严重落后：进度严重滞后于计划（落后50%以上），请排查！", style = "color: #D32F2F; font-weight: bold;")
     } else if(diff_p < -0.3) {
@@ -2877,7 +2896,7 @@ server <- function(input, output, session) {
       ctx$project_id,
       if (ctx$is_sync) "各中心同步阶段" else ctx$site_name
     )
-    if (identical(ctx$task_name, "S09_验证试验开展与数据管理") && ctx$is_sync) {
+    if (isTRUE(ctx$supports_sample)) {
       n_init <- if (!is.null(ctx$samples)) nrow(ctx$samples) else 0L
       sample_row_count(n_init)
     } else {
@@ -2925,7 +2944,7 @@ server <- function(input, output, session) {
 
   refresh_task_context_from_db <- function(ctx) {
     main_cols <- c(ctx$col_map$planned_start, ctx$col_map$actual_start, ctx$col_map$plan, ctx$col_map$act, ctx$col_map$note, ctx$col_map$progress)
-    if (identical(ctx$task_name, "S09_验证试验开展与数据管理") && ctx$is_sync) {
+    if (isTRUE(ctx$supports_sample)) {
       main_cols <- c(main_cols, "sample_json")
     }
     latest_row <- fetch_row_snapshot(pg_con, ctx$table_name, ctx$stage_instance_id, main_cols, lock = FALSE)
@@ -2942,7 +2961,7 @@ server <- function(input, output, session) {
     ctx$progress <- suppressWarnings(as.numeric(latest_row[[ctx$col_map$progress]]) / 100)
     ctx$remark <- latest_row[[ctx$note_col]]
     ctx$remark_entries <- parse_remark_json_to_df(latest_row[[ctx$note_col]])
-    if (identical(ctx$task_name, "S09_验证试验开展与数据管理") && ctx$is_sync) {
+    if (isTRUE(ctx$supports_sample)) {
       ctx$samples <- parse_sample_df(latest_row[["sample_json"]])
     }
     ctx
@@ -3048,7 +3067,7 @@ server <- function(input, output, session) {
         nm <- input[[paste0(sid, "_name")]]
         ord <- input[[paste0(sid, "_order")]]
         sc <- input[[paste0(sid, "_scope")]]
-        samp <- identical(as.character(df$stage_key[i]), "S09_验证试验开展与数据管理")
+        samp <- isTRUE(as.logical(df$supports_sample[i]))
         act <- isTRUE(input[[paste0(sid, "_active")]])
         cfg <- input[[paste0(sid, "_config")]]
         if (is.null(nm) && is.null(ord) && is.null(sc) && is.null(cfg)) next
@@ -3087,7 +3106,8 @@ server <- function(input, output, session) {
       fluidRow(
         column(4, numericInput("new_stage_order", "排序", value = 99, min = 0, step = 1, width = "100%")),
         column(4, selectInput("new_stage_scope", "scope", choices = c("sync", "site"), selected = "site", width = "100%")),
-        column(4, tags$div(style = "margin-top: 25px;", checkboxInput("new_stage_active", "模板启用", value = TRUE)))
+        column(2, tags$div(style = "margin-top: 25px;", checkboxInput("new_stage_active", "模板启用", value = TRUE))),
+        column(2, tags$div(style = "margin-top: 25px;", checkboxInput("new_stage_supports_sample", "支持样本追踪", value = FALSE)))
       ),
       fluidRow(
         column(12, textAreaInput("new_stage_config", "stage_config (JSON)", value = "{}", rows = 4, width = "100%", placeholder = '{"work_choices":["选项1","选项2"]}'))
@@ -3117,7 +3137,7 @@ server <- function(input, output, session) {
       ins <- 'INSERT INTO public."08项目阶段定义表" (project_type, stage_key, stage_name, stage_scope, stage_order, supports_sample, is_active, stage_config) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING id'
       res <- DBI::dbGetQuery(pg_con, ins, params = list(
         pt, k, nm %||% k, input$new_stage_scope, as.integer(input$new_stage_order %||% 99),
-        identical(k, "S09_验证试验开展与数据管理"), isTRUE(input$new_stage_active), cfg
+        isTRUE(input$new_stage_supports_sample), isTRUE(input$new_stage_active), cfg
       ))
       new_def_id <- res$id[1]
       sc <- input$new_stage_scope
@@ -3979,7 +3999,7 @@ server <- function(input, output, session) {
   # S09“验证试验开展与数据管理”样本来源与数量编辑区
   output$sample_pairs_editor <- renderUI({
     ctx <- task_edit_context()
-    if (is.null(ctx) || !identical(ctx$task_name, "S09_验证试验开展与数据管理") || !ctx$is_sync) {
+    if (is.null(ctx) || !isTRUE(ctx$supports_sample)) {
       return(NULL)
     }
     n_rows <- sample_row_count()
@@ -4048,7 +4068,7 @@ server <- function(input, output, session) {
   observeEvent(input$btn_add_sample_pair, {
     ctx <- task_edit_context()
     req(ctx)
-    if (!identical(ctx$task_name, "S09_验证试验开展与数据管理") || !ctx$is_sync) return()
+    if (!isTRUE(ctx$supports_sample)) return()
     n_cur <- sample_row_count()
     if (is.null(n_cur) || n_cur < 0L) n_cur <- 0L
 
@@ -4144,7 +4164,7 @@ server <- function(input, output, session) {
     user_remark_map <- build_remark_map_from_df(remark_df, actor = actor_name)
 
     # 针对 S09“验证试验开展与数据管理”的样本来源与数量特殊处理
-    is_s09_task <- identical(ctx$task_name, "S09_验证试验开展与数据管理") && ctx$is_sync
+    is_s09_task <- isTRUE(ctx$supports_sample)
     sample_col <- "sample_json"
     sample_df <- ctx$samples
     if (is.null(sample_df)) sample_df <- empty_sample_df()
