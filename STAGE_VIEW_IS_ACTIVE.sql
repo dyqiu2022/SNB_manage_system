@@ -2,6 +2,7 @@
 -- 04.is_active: 项目是否参与甘特（可归档）
 -- 08.is_active: 模板默认，触发器用；视图不再按 08 过滤，以 09 实例为准
 -- 09.is_active: 实例是否参与甘特；NULL 视为 TRUE 兼容旧数据
+-- milestones_json: 存储于 04（同步阶段）/ 03（子中心阶段），不再存 09
 
 DROP VIEW IF EXISTS public."v_项目阶段甘特视图";
 
@@ -16,23 +17,25 @@ SELECT
   si.project_id AS proj_row_id,
   si.site_project_id AS site_row_id,
   CASE
-    WHEN si.stage_scope = 'sync' THEN '所有中心（同步）'
+    WHEN d.stage_scope = 'sync' THEN '所有中心（同步）'
     ELSE COALESCE(NULLIF(h."医院名称", ''), '中心-' || COALESCE(s.id, 0)::text)
   END AS site_name,
-  si.stage_key AS task_name,
+  d.stage_key AS task_name,
   d.stage_name AS task_display_name,
   d.stage_order AS stage_ord,
-  si.stage_scope,
+  d.stage_scope,
   'Process'::text AS task_type,
-  si.start_date,
+  si.planned_start_date,
+  si.actual_start_date,
+  COALESCE(si.actual_start_date, si.planned_start_date) AS start_date,
   si.planned_end_date,
   si.actual_end_date,
   COALESCE(si.progress, 0)::numeric / 100.0 AS progress,
-  (si.start_date IS NULL OR si.planned_end_date IS NULL) AS is_unplanned,
+  (COALESCE(si.actual_start_date, si.planned_start_date) IS NULL OR si.planned_end_date IS NULL) AS is_unplanned,
   si.remark_json::text AS remark,
   si.remark_json,
   si.contributors_json,
-  si.milestones_json,
+  CASE WHEN d.stage_scope = 'sync' THEN p.milestones_json ELSE s.milestones_json END AS milestones_json,
   si.sample_json,
   si.row_version,
   mgr."姓名" AS manager_name

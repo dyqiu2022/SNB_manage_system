@@ -135,21 +135,238 @@ norm_progress <- function(x) {
   pmin(1, pmax(0, x))
 }
 
+# 项目汇总弹窗：解析展示用项目主键、参与度颜色与数量（server 内亦会用到同名函数）
+resolve_project_db_id_from_display <- function(con, display_pid) {
+  pid <- as.character(display_pid %||% "")
+  if (!nzchar(pid)) return(NA_integer_)
+  if (grepl("^项目-[0-9]+$", pid)) {
+    return(as.integer(sub("^项目-", "", pid)))
+  }
+  pr <- DBI::dbGetQuery(con, 'SELECT id FROM public."04项目总表" WHERE "项目名称" = $1', params = list(pid))
+  if (nrow(pr) > 0) return(as.integer(pr$id[1]))
+  NA_integer_
+}
+
+contrib_role_color <- function(role) {
+  r <- trimws(as.character(role %||% ""))
+  if (identical(r, "主导")) return("#C62828")
+  if (identical(r, "参与")) return("#1565C0")
+  if (identical(r, "协助")) return("#2E7D32")
+  "#616161"
+}
+
+# 问题/卡点/经验分享：仅「类型」词着色（【】括号不染色）
+remark_type_color <- function(type) {
+  t <- trimws(as.character(type %||% ""))
+  if (identical(t, "卡点")) return("#C62828")
+  if (identical(t, "经验分享")) return("#2E7D32")
+  if (identical(t, "问题")) return("#F57C00")
+  "#616161"
+}
+
+# 项目汇总弹窗：一行贡献者，仅「参与度」三字着色，其余为默认深色
+contrib_summary_line_tag <- function(role, work, amt_txt, font_size = "14px") {
+  r <- trimws(as.character(role %||% ""))
+  col <- contrib_role_color(r)
+  tags$div(
+    style = paste0("margin-left: 10px; font-size: ", font_size, "; color: #333;"),
+    tags$span(style = paste0("color: ", col, "; font-weight: 600;"), r),
+    sprintf("-%s-数量：%s", work, amt_txt)
+  )
+}
+
+contrib_role_sort_key <- function(role) {
+  r <- trimws(as.character(role %||% ""))
+  if (identical(r, "主导")) return(1L)
+  if (identical(r, "参与")) return(2L)
+  if (identical(r, "协助")) return(3L)
+  99L
+}
+
+parse_contrib_amount_num <- function(amt) {
+  s <- trimws(as.character(amt %||% ""))
+  if (!nzchar(s)) return(1)
+  n <- suppressWarnings(as.numeric(s))
+  if (!is.na(n)) return(n)
+  1
+}
+
 
 # ---------------- 2. UI 界面 ----------------
 ui <- fluidPage(
   tags$head(
+    tags$script(HTML("
+      // timevis 把 vis Timeline 放在 el.widget.timeline（见 timevis.js container.widget = that）
+      (function() {
+        window.__ganttGetTimeline = function(root) {
+          if (!root) return null;
+          if (root.widget && root.widget.timeline) return root.widget.timeline;
+          if (root.timeline) return root.timeline;
+          var inner = root.querySelector && root.querySelector('.html-widget');
+          if (inner) {
+            if (inner.widget && inner.widget.timeline) return inner.widget.timeline;
+            if (inner.timeline) return inner.timeline;
+          }
+          return null;
+        };
+      })();
+
+      Shiny.addCustomMessageHandler('resetGanttSelection', function(ganttId) {
+        var el = document.getElementById(ganttId);
+        var tl = window.__ganttGetTimeline(el);
+        if (tl) { tl.setSelection([]); }
+        Shiny.setInputValue(ganttId + '_selected', null);
+      });
+
+      // 自适应甘特图高度：
+      //   - 直接按当前视口高度与组件在视口中的 top 计算可用高度
+      //   - 同时改 outer/inner/vis-timeline 三层高度并触发 redraw
+      //   - 监听 resize / visualViewport.resize / scroll / shiny:value
+      (function() {
+        var GANTT_ID   = 'my_gantt';
+        var BOTTOM_PAD = 16;
+        var MIN_HEIGHT = 300;
+
+        function resizeGantt() {
+          var outer = document.getElementById(GANTT_ID);
+          if (!outer) return;
+
+          var inner = outer.querySelector('.html-widget') || outer;
+          var rect = outer.getBoundingClientRect();
+          var vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+          var topInViewport = Math.max(rect.top, 0);
+          var avail = Math.max(vh - topInViewport - BOTTOM_PAD, MIN_HEIGHT);
+          var css = avail + 'px';
+
+          outer.style.minHeight = MIN_HEIGHT + 'px';
+          outer.style.height    = css;
+          inner.style.minHeight = MIN_HEIGHT + 'px';
+          inner.style.height    = css;
+
+          var timelineRoot = outer.querySelector('.vis-timeline');
+          if (timelineRoot) timelineRoot.style.height = css;
+
+          var tl = window.__ganttGetTimeline(outer);
+          if (tl && tl.redraw) tl.redraw();
+        }
+
+        window.addEventListener('resize', resizeGantt);
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener('resize', resizeGantt);
+        }
+        window.addEventListener('scroll', resizeGantt, { passive: true });
+
+        $(document).on('shiny:value', function(e) {
+          var isTarget = (e.name === GANTT_ID) || (e.target && e.target.id === GANTT_ID);
+          if (isTarget) {
+            setTimeout(resizeGantt, 200);
+            setTimeout(resizeGantt, 700);
+          }
+        });
+        // 页面就绪兜底
+        $(document).ready(function() {
+          setTimeout(resizeGantt, 800);
+          setTimeout(resizeGantt, 1600);
+        });
+      })();
+
+      // 项目标题点击：用 timeline.getEventProperties(event)（不依赖 el.timeline，应使用 el.widget.timeline）
+      (function() {
+        var GANTT_ID = 'my_gantt';
+        function ensureProjectSummaryClick() {
+          var outer = document.getElementById(GANTT_ID);
+          if (!outer || outer._projectSummaryClickDom) return;
+          outer._projectSummaryClickDom = true;
+          outer.addEventListener('click', function(ev) {
+            var tl = window.__ganttGetTimeline(outer);
+            if (!tl || typeof tl.getEventProperties !== 'function') return;
+            var props = tl.getEventProperties(ev);
+            if (!props || props.what !== 'group-label') return;
+            var gid = props.group;
+            if (gid === null || typeof gid === 'undefined') return;
+            gid = String(gid);
+            if (gid.indexOf('MOCK_SEPARATOR_') !== 0) return;
+            var projId = gid.substring('MOCK_SEPARATOR_'.length);
+            Shiny.setInputValue('project_header_clicked', { project_id: projId, nonce: Date.now() }, { priority: 'event' });
+          }, false);
+        }
+        $(document).on('shiny:value', function(e) {
+          var t = e && e.target;
+          if (!t) return;
+          var host = t.id === GANTT_ID ? t : (t.closest ? t.closest('#' + GANTT_ID) : null);
+          if (host) {
+            setTimeout(ensureProjectSummaryClick, 0);
+            setTimeout(ensureProjectSummaryClick, 100);
+          }
+        });
+        $(document).ready(function() {
+          setTimeout(ensureProjectSummaryClick, 0);
+          setTimeout(ensureProjectSummaryClick, 600);
+        });
+      })();
+    ")),
+    tags$script(HTML("
+      // 甘特筛选「且条件 / 或条件」：与项目汇总贡献者切换相同，点击即时改文案 + 同步 Shiny
+      (function() {
+        $(document).on('click', '#gantt_filter_combine_btn', function(e) {
+          e.preventDefault();
+          var btn = $(this);
+          var mode = btn.attr('data-mode') || 'and';
+          mode = (mode === 'and') ? 'or' : 'and';
+          btn.attr('data-mode', mode);
+          btn.text(mode === 'and' ? '且条件' : '或条件');
+          if (window.Shiny && Shiny.setInputValue) {
+            Shiny.setInputValue('gantt_filter_combine_mode', mode, { priority: 'event' });
+          }
+        });
+      })();
+    ")),
+    tags$style(HTML("
+      /* 紧凑进度条与里程碑控件：让 item 高度贴近内部文字，节省纵向空间 */
+      .vis-item {
+        font-size: 12px;
+        line-height: 1.15;
+      }
+      .vis-item .vis-item-content {
+        padding: 2px 5px;
+        white-space: nowrap;
+      }
+    ")),
     tags$style(HTML("
       .vis-labelset { width: 240px !important; }
       .vis-current-time { width: 2px; background-color: red; z-index: 10; }
-      /* 项目间分割线样式 */
-      .vis-group[id*='MOCK_SEPARATOR'] {
-        background-color: #E0E0E0 !important;
-        min-height: 4px !important;
+      /* 项目标题行（间隔行升级为项目标题） */
+      .vis-group.gantt-row-sep {
+        background-color: #D8DDE3 !important;
       }
-      .vis-group[id*='MOCK_SEPARATOR'] .vis-label {
-        background-color: #E0E0E0 !important;
-        min-height: 4px !important;
+      .vis-group.gantt-row-sep .vis-label,
+      .vis-group.gantt-row-sep .vis-label .vis-inner {
+        background-color: #B7BEC7 !important;
+        color: #1F2933 !important;
+      }
+      .vis-group.gantt-row-sep .vis-label,
+      .vis-group.gantt-row-sep .vis-label .vis-inner,
+      .vis-group.gantt-row-sep .vis-label .vis-inner * {
+        font-weight: 800 !important;
+        font-size: 14px !important;
+        line-height: 1.2 !important;
+        font-family: 'Noto Sans CJK SC','Microsoft YaHei','PingFang SC','Helvetica Neue',Arial,sans-serif !important;
+      }
+      /* 间隔行（项目标题）：行高 = 文字 + 上下各 2px */
+      .vis-labelset .vis-label.gantt-row-sep {
+        padding: 0 !important;
+      }
+      .vis-labelset .vis-label.gantt-row-sep .vis-inner {
+        padding: 2px 8px !important;
+        line-height: 1.2 !important;
+        box-sizing: border-box !important;
+      }
+      /* 左侧行头标签（用户点击的是这里，不是右侧 .vis-group 轨道） */
+      .vis-labelset .vis-label.gantt-row-sep,
+      .vis-labelset .vis-label.gantt-row-sep .vis-inner {
+        cursor: pointer !important;
+      }
+      .vis-group.gantt-row-sep .vis-label {
         padding: 0 !important;
       }
       /* 按“重要紧急程度”区分行背景（浅色，不干扰进度条） */
@@ -163,20 +380,140 @@ ui <- fluidPage(
       .vis-group.gantt-bg-不重要不紧急 .vis-label { background-color: #F5F5F5 !important; }/* very light grey */
       .vis-group.gantt-bg-default,
       .vis-group.gantt-bg-default .vis-label { background-color: #FAFAFA !important; }
+    ")),
+    tags$style(HTML("
+      /* 所有弹出窗口横向宽度 +20%（相对 Bootstrap 3 常见默认：中 600px / 大 900px / 小 300px） */
+      .modal-dialog:not(.modal-sm):not(.modal-lg) {
+        width: 720px !important;
+        max-width: min(720px, 98vw) !important;
+      }
+      .modal-dialog.modal-lg {
+        width: 1080px !important;
+        max-width: min(1080px, 98vw) !important;
+      }
+      /* 项目汇总：在 modal-lg 基础上再 +30% 宽（1080 × 1.3 ≈ 1404） */
+      .modal-dialog.modal-lg:has(#project_summary_tabs) {
+        width: 1404px !important;
+        max-width: min(1404px, 98vw) !important;
+      }
+      .modal-dialog.modal-sm {
+        width: 360px !important;
+        max-width: min(360px, 98vw) !important;
+      }
+      /* bslib / Bootstrap 5 下 modal-lg 常用 max-width */
+      @media (min-width: 992px) {
+        .modal-lg { max-width: 1080px !important; }
+        .modal-lg:has(#project_summary_tabs) { max-width: min(1404px, 98vw) !important; }
+      }
+    ")),
+    tags$style(HTML("
+      .gantt-row-flex {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-start;
+        width: 100%;
+        gap: 0;
+      }
+      .gantt-sidebar-wrap {
+        flex: 0 0 300px;
+        max-width: 320px;
+        border-right: 1px solid #e0e0e0;
+        padding-right: 12px;
+        margin-right: 0;
+        position: sticky;
+        top: 8px;
+        align-self: flex-start;
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+        transition: flex-basis 0.2s ease, max-width 0.2s ease;
+      }
+      .gantt-sidebar-wrap.collapsed {
+        flex: 0 0 26px;
+        max-width: 26px;
+        padding-right: 0;
+        overflow: visible;
+      }
+      .gantt-sidebar-wrap.collapsed .gantt-sidebar-body {
+        display: none !important;
+      }
+      .gantt-sidebar-wrap.collapsed #gantt_sidebar_toggle {
+        width: 100% !important;
+        max-width: 24px;
+        min-width: 22px;
+        padding: 5px 2px !important;
+        margin-bottom: 0 !important;
+        font-size: 13px;
+        line-height: 1;
+      }
+      .gantt-main-wrap {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding-left: 12px;
+      }
+      @media (max-width: 767px) {
+        .gantt-row-flex { flex-direction: column !important; }
+        .gantt-sidebar-wrap {
+          flex: 1 1 auto !important;
+          max-width: 100% !important;
+          border-right: none;
+          border-bottom: 1px solid #e0e0e0;
+          padding-bottom: 10px;
+          margin-bottom: 8px;
+          position: relative;
+          max-height: none;
+        }
+        .gantt-sidebar-wrap.collapsed .gantt-sidebar-body { display: none !important; }
+        .gantt-main-wrap { padding-left: 0; }
+      }
+    ")),
+    tags$script(HTML("
+      $(document).on('click', '#gantt_sidebar_toggle', function() {
+        $('#gantt_sidebar_col').toggleClass('collapsed');
+        var c = $('#gantt_sidebar_col').hasClass('collapsed');
+        if (c) {
+          $(this).text('\\u25b6');
+          $(this).attr('title', '\\u5c55\\u5f00\\u7b5b\\u9009');
+        } else {
+          $(this).text('\\u25c0 \\u6536\\u8d77\\u7b5b\\u9009');
+          $(this).attr('title', '\\u6536\\u8d77\\u7b5b\\u9009');
+        }
+        setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 150);
+        setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 400);
+      });
     "))
   ),
-  titlePanel(paste("Snibe临床 - 项目进度管理看板 (当前日期:", today, ")")),
+  uiOutput("app_title_panel"),
   uiOutput("current_user_display"),
   fluidRow(
     column(
       12,
-      uiOutput("gantt_filters"),
-      uiOutput("gantt_db_msg"),
-       HTML("
+      tags$div(
+        id = "gantt_row_flex",
+        class = "gantt-row-flex",
+        tags$div(
+          id = "gantt_sidebar_col",
+          class = "gantt-sidebar-wrap",
+          tags$button(
+            type = "button",
+            id = "gantt_sidebar_toggle",
+            class = "btn btn-default btn-sm",
+            title = "收起筛选",
+            style = "width: 100%; margin-bottom: 10px; white-space: nowrap;",
+            "◀ 收起筛选"
+          ),
+          tags$div(
+            class = "gantt-sidebar-body",
+            uiOutput("gantt_filters"),
+            uiOutput("gantt_db_msg")
+          )
+        ),
+        tags$div(
+          class = "gantt-main-wrap",
+          HTML("
          <div style='margin-bottom: 10px; font-size: 12px; color: #555;'>
            <b>进度诊断图例：</b>
-                   <span style='margin-left:15px; padding:2px 8px; background:#EDEDED; border:2px solid #BDBDBD; border-radius:3px; color:#555;'>未制定计划 (白灰)</span>
-                   <span style='margin-left:15px; padding:2px 8px; background:#9E9E9E; border:2px solid #9E9E9E; border-radius:3px; color:white;'>未开始 (深灰)</span>
+                   <span style='margin-left:15px; padding:2px 8px; background:#EDEDED; border:1px solid #D0D0D0; border-radius:3px; color:#555;'>未制定计划 (白灰)</span>
+                   <span style='margin-left:15px; padding:2px 8px; background:#9E9E9E; border:2px solid #9E9E9E; border-radius:3px; color:white;'>未开始 (深灰)：未到计划启动，或已填计划起止但未填实际开始</span>
                <span style='margin-left:15px; padding:2px 8px; background:#F44336; border:2px solid #F44336; border-radius:3px; color:white;'>落后50%以上</span>
                <span style='margin-left:10px; padding:2px 8px; background:#FF6F00; border:2px solid #FF6F00; border-radius:3px; color:white;'>落后30%-50%</span>
                <span style='margin-left:10px; padding:2px 8px; background:#FFC107; border:2px solid #FFC107; border-radius:3px; color:white;'>落后15%-30%</span>
@@ -186,14 +523,17 @@ ui <- fluidPage(
                <span style='margin-left:10px; padding:2px 8px; background:#4CAF50; border:2px solid #4CAF50; border-radius:3px; color:white;'>超前25%以上</span>
              </div>
          "),
-         timevisOutput("my_gantt", height = "650px")
+          timevisOutput("my_gantt", height = "100%")
+        )
+      )
     )
   )
 )
 
 # ---------------- 3. Server 逻辑 ----------------
 server <- function(input, output, session) {
-  
+  today <- Sys.Date()   # session 级实时日期（覆盖启动时全局值）
+
   # ----- 数据库连接与表浏览（使用全局连接池） -----
   pg_con <- pg_pool
 
@@ -207,6 +547,8 @@ server <- function(input, output, session) {
   conflict_resolution_state <- reactiveVal(NULL)
   stage_maintain_context <- reactiveVal(NULL)
   stage_maintain_tab1_refresh <- reactiveVal(0L)
+  personnel_center_context <- reactiveVal(NULL)
+  pc_center_refresh <- reactiveVal(0L)
 
   # ---------- 操作审计：写入 07操作审计表 ----------
   insert_audit_log <- function(conn, work_id, name, op_type, target_table, target_row_id, biz_desc, summary, old_val, new_val, remark = NULL) {
@@ -240,6 +582,7 @@ server <- function(input, output, session) {
       role = character(0),
       work = character(0),
       amount = character(0),
+      note = character(0),
       stringsAsFactors = FALSE
     )
   }
@@ -267,7 +610,6 @@ server <- function(input, output, session) {
   empty_milestone_df <- function() {
     data.frame(
       entry_key = character(0),
-      stage_key = character(0),
       name = character(0),
       plan = character(0),
       actual = character(0),
@@ -809,6 +1151,7 @@ server <- function(input, output, session) {
         role <- normalize_text(val$role, empty_as_na = FALSE)
         work <- normalize_text(val$work, empty_as_na = FALSE)
         amount <- normalize_text(val$amount, empty_as_na = FALSE)
+        note <- if (!is.null(val$note)) normalize_text(val$note, empty_as_na = FALSE) else ""
       } else {
         pieces <- strsplit(as.character(val %||% ""), "|", fixed = TRUE)[[1]]
         if (is_legacy_name_time_key(key) && length(pieces) < 4L) pieces <- c(key, pieces)
@@ -817,6 +1160,7 @@ server <- function(input, output, session) {
         role <- pieces[2]
         work <- pieces[3]
         amount <- pieces[4]
+        note <- ""
       }
       data.frame(
         entry_key = key,
@@ -824,6 +1168,7 @@ server <- function(input, output, session) {
         role = role,
         work = work,
         amount = amount,
+        note = note,
         stringsAsFactors = FALSE
       )
     })
@@ -840,15 +1185,13 @@ server <- function(input, output, session) {
       role <- trimws(as.character(df$role[i] %||% ""))
       work <- trimws(as.character(df$work[i] %||% ""))
       amount <- trimws(as.character(df$amount[i] %||% ""))
+      note <- if ("note" %in% names(df)) trimws(as.character(df$note[i] %||% "")) else ""
       entry_key <- trimws(as.character(df$entry_key[i] %||% ""))
       if (!nzchar(entry_key)) entry_key <- make_entry_key(actor, existing_keys = c(existing_keys, names(out)), prefix = "contrib")
       existing_keys <- c(existing_keys, entry_key)
-      out[[entry_key]] <- list(
-        person = person,
-        role = role,
-        work = work,
-        amount = amount
-      )
+      entry_val <- list(person = person, role = role, work = work, amount = amount)
+      if (nzchar(note)) entry_val$note <- note
+      out[[entry_key]] <- entry_val
     }
     out
   }
@@ -1071,41 +1414,40 @@ server <- function(input, output, session) {
     if (length(mapped) == 0) return(empty_milestone_df())
     rows <- lapply(names(mapped), function(key) {
       val <- mapped[[key]]
-      if (is.list(val) && any(c("stage_key", "name", "plan", "actual", "note") %in% names(val))) {
+      if (is.list(val)) {
+        # 当前格式（含旧版有 stage_key 字段的数据）：直接读 name/plan/actual/note
         data.frame(
           entry_key = key,
-          stage_key = normalize_text(val$stage_key, empty_as_na = FALSE),
-          name = normalize_text(val$name, empty_as_na = FALSE),
-          plan = normalize_text(val$plan, empty_as_na = FALSE),
+          name   = normalize_text(val$name,   empty_as_na = FALSE),
+          plan   = normalize_text(val$plan,   empty_as_na = FALSE),
           actual = normalize_text(val$actual, empty_as_na = FALSE),
-          note = normalize_text(val$note, empty_as_na = FALSE),
+          note   = normalize_text(val$note,   empty_as_na = FALSE),
           stringsAsFactors = FALSE
         )
       } else if (grepl("::", key, fixed = TRUE)) {
+        # 遗留格式：stage_key::里程碑名称 作为 key，管道分隔字符串作为值
         key_parts <- strsplit(key, "::", fixed = TRUE)[[1]]
-        stage_key <- if (length(key_parts) >= 1L) key_parts[1] else ""
         name <- if (length(key_parts) >= 2L) key_parts[2] else ""
         pieces <- strsplit(as.character(val %||% ""), "|", fixed = TRUE)[[1]]
         while (length(pieces) < 3L) pieces <- c(pieces, "无")
         data.frame(
           entry_key = key,
-          stage_key = stage_key,
-          name = name,
-          plan = ifelse(pieces[1] == "无", "", pieces[1]),
+          name   = name,
+          plan   = ifelse(pieces[1] == "无", "", pieces[1]),
           actual = ifelse(pieces[2] == "无", "", pieces[2]),
-          note = ifelse(pieces[3] == "无", "", pieces[3]),
+          note   = ifelse(pieces[3] == "无", "", pieces[3]),
           stringsAsFactors = FALSE
         )
       } else {
+        # 最早遗留格式：管道分隔字符串（首段为旧 stage_key，跳过）
         pieces <- strsplit(as.character(val %||% ""), "|", fixed = TRUE)[[1]]
         while (length(pieces) < 5L) pieces <- c(pieces, "无")
         data.frame(
           entry_key = key,
-          stage_key = pieces[1],
-          name = ifelse(pieces[2] == "无", "", pieces[2]),
-          plan = ifelse(pieces[3] == "无", "", pieces[3]),
+          name   = ifelse(pieces[2] == "无", "", pieces[2]),
+          plan   = ifelse(pieces[3] == "无", "", pieces[3]),
           actual = ifelse(pieces[4] == "无", "", pieces[4]),
-          note = ifelse(pieces[5] == "无", "", pieces[5]),
+          note   = ifelse(pieces[5] == "无", "", pieces[5]),
           stringsAsFactors = FALSE
         )
       }
@@ -1118,21 +1460,21 @@ server <- function(input, output, session) {
     out <- list()
     existing_keys <- character(0)
     for (i in seq_len(nrow(df))) {
-      stage_key <- trimws(as.character(df$stage_key[i] %||% ""))
       name <- trimws(as.character(df$name[i] %||% ""))
-      if (!nzchar(stage_key) || !nzchar(name)) next
-      plan <- trimws(as.character(df$plan[i] %||% ""))
+      if (!nzchar(name)) next
+      plan   <- trimws(as.character(df$plan[i]   %||% ""))
       actual <- trimws(as.character(df$actual[i] %||% ""))
-      note <- trimws(as.character(df$note[i] %||% ""))
+      note   <- trimws(as.character(df$note[i]   %||% ""))
       entry_key <- trimws(as.character(df$entry_key[i] %||% ""))
-      if (!nzchar(entry_key)) entry_key <- make_entry_key(actor, existing_keys = c(existing_keys, names(out)), prefix = "milestone")
+      if (!nzchar(entry_key) || entry_key %in% c(existing_keys, names(out))) {
+        entry_key <- make_entry_key(actor, existing_keys = c(existing_keys, names(out)), prefix = "ms")
+      }
       existing_keys <- c(existing_keys, entry_key)
       out[[entry_key]] <- list(
-        stage_key = stage_key,
-        name = name,
-        plan = ifelse(nzchar(plan), plan, ""),
+        name   = name,
+        plan   = ifelse(nzchar(plan),   plan,   ""),
         actual = ifelse(nzchar(actual), actual, ""),
-        note = ifelse(nzchar(note), note, "")
+        note   = ifelse(nzchar(note),   note,   "")
       )
     }
     out
@@ -1299,22 +1641,22 @@ server <- function(input, output, session) {
       if (is.na(status) || status != "在职") return(list(allow_all = FALSE, allow_none = TRUE, allowed_subquery = "", is_super_admin = FALSE))
       if (is.na(level) || level == "deny_access") return(list(allow_all = FALSE, allow_none = TRUE, allowed_subquery = "", is_super_admin = FALSE))
       name <- if ("姓名" %in% names(r) && !is.na(r[["姓名"]][1])) trimws(as.character(r[["姓名"]][1])) else ""
-      if (level == "super_admin") return(list(allow_all = TRUE, allow_none = FALSE, allowed_subquery = "", work_id = wid, name = name, is_super_admin = TRUE))
-      if (level == "manager") return(list(allow_all = TRUE, allow_none = FALSE, allowed_subquery = "", work_id = wid, name = name, is_super_admin = FALSE))
+      if (level == "super_admin") return(list(allow_all = TRUE, allow_none = FALSE, allowed_subquery = "", work_id = wid, name = name, is_super_admin = TRUE, can_manage_project = TRUE))
+      if (level == "manager") return(list(allow_all = TRUE, allow_none = FALSE, allowed_subquery = "", work_id = wid, name = name, is_super_admin = FALSE, can_manage_project = TRUE))
       pid <- as.integer(r[["id"]][1])
       if (level == "common_user") {
         subq <- sprintf(
           "SELECT id FROM public.\"04项目总表\" WHERE \"05人员表_id\" = %d UNION SELECT \"04项目总表_id\" FROM public.\"_nc_m2m_04项目总表_05人员表\" WHERE \"05人员表_id\" = %d",
           pid, pid
         )
-        return(list(allow_all = FALSE, allow_none = FALSE, allowed_subquery = subq, work_id = wid, name = name, is_super_admin = FALSE))
+        return(list(allow_all = FALSE, allow_none = FALSE, allowed_subquery = subq, work_id = wid, name = name, is_super_admin = FALSE, can_manage_project = FALSE))
       }
       if (level == "group_manager") {
         subq <- sprintf(
           "SELECT id FROM public.\"04项目总表\" WHERE \"05人员表_id\" IN (SELECT id FROM public.\"05人员表\" WHERE \"组别\" IS NOT DISTINCT FROM (SELECT \"组别\" FROM public.\"05人员表\" WHERE id = %d)) UNION SELECT \"04项目总表_id\" FROM public.\"_nc_m2m_04项目总表_05人员表\" WHERE \"05人员表_id\" IN (SELECT id FROM public.\"05人员表\" WHERE \"组别\" IS NOT DISTINCT FROM (SELECT \"组别\" FROM public.\"05人员表\" WHERE id = %d))",
           pid, pid
         )
-        return(list(allow_all = FALSE, allow_none = FALSE, allowed_subquery = subq, work_id = wid, name = name, is_super_admin = FALSE))
+        return(list(allow_all = FALSE, allow_none = FALSE, allowed_subquery = subq, work_id = wid, name = name, is_super_admin = FALSE, can_manage_project = TRUE))
       }
       list(allow_all = FALSE, allow_none = TRUE, allowed_subquery = "", is_super_admin = FALSE)
     }, error = function(e) list(allow_all = FALSE, allow_none = TRUE, allowed_subquery = "", is_super_admin = FALSE))
@@ -1456,10 +1798,60 @@ server <- function(input, output, session) {
       participant = input$filter_participant,
       importance = input$filter_importance,
       hospital = input$filter_hospital,
-      include_archived = input$filter_include_archived
+      include_archived = input$filter_include_archived,
+      combine_mode = {
+        v <- input$gantt_filter_combine_mode
+        if (is.null(v) || !v %in% c("and", "or")) "and" else v
+      }
     )
   })
   gantt_filter_state_debounced <- debounce(gantt_filter_state, 400)
+
+  # 甘特筛选：各维度子句列表；combine_mode 为 or 时用 OR 包成一组，为 and 时逐项 AND。同一维度内多选为 IN。与权限、归档条件仍为 AND。
+  build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp) {
+    p <- 0L
+    or_parts <- character(0)
+    params_stage <- list()
+    make_ph <- function(n, start_idx) {
+      paste(sprintf("$%d", start_idx + seq_len(n) - 1L), collapse = ",")
+    }
+    if (length(ft) > 0L) {
+      ph <- make_ph(length(ft), p + 1L)
+      or_parts <- c(or_parts, sprintf("project_type IN (%s)", ph))
+      params_stage <- c(params_stage, as.list(ft))
+      p <- p + length(ft)
+    }
+    if (length(fn) > 0L) {
+      ph <- make_ph(length(fn), p + 1L)
+      or_parts <- c(or_parts, sprintf("project_id IN (%s)", ph))
+      params_stage <- c(params_stage, as.list(fn))
+      p <- p + length(fn)
+    }
+    if (length(manager_ids) > 0L) {
+      ph <- make_ph(length(manager_ids), p + 1L)
+      or_parts <- c(or_parts, sprintf("project_db_id IN (SELECT id FROM public.\"04项目总表\" WHERE \"05人员表_id\" IN (%s))", ph))
+      params_stage <- c(params_stage, as.list(manager_ids))
+      p <- p + length(manager_ids)
+    }
+    if (length(proj_ids_participant) > 0L) {
+      ph <- make_ph(length(proj_ids_participant), p + 1L)
+      or_parts <- c(or_parts, sprintf("project_db_id IN (%s)", ph))
+      params_stage <- c(params_stage, as.list(proj_ids_participant))
+      p <- p + length(proj_ids_participant)
+    }
+    if (length(fi) > 0L) {
+      ph <- make_ph(length(fi), p + 1L)
+      or_parts <- c(or_parts, sprintf("\"重要紧急程度\" IN (%s)", ph))
+      params_stage <- c(params_stage, as.list(fi))
+      p <- p + length(fi)
+    }
+    if (length(proj_ids_hosp) > 0L) {
+      ph <- make_ph(length(proj_ids_hosp), p + 1L)
+      or_parts <- c(or_parts, sprintf("project_db_id IN (%s)", ph))
+      params_stage <- c(params_stage, as.list(proj_ids_hosp))
+    }
+    list(dim_parts = or_parts, params_stage = params_stage)
+  }
 
   output$gantt_db_msg <- renderUI({
     err <- gantt_db_error()
@@ -1474,6 +1866,10 @@ server <- function(input, output, session) {
 
 
   # 标题下显示当前登录帐号：姓名-工号（来自 Nginx 鉴权后的 X-User 工号 + 05人员表 姓名）
+  output$app_title_panel <- renderUI({
+    titlePanel(paste("Snibe临床 - 项目进度管理看板 (当前日期:", Sys.Date(), ")"))
+  })
+
   output$current_user_display <- renderUI({
     auth <- current_user_auth()
     if (is.null(auth) || auth$allow_none) return(tags$p(style = "color: #888; font-size: 13px; margin: 4px 0;", "当前登录帐号：未登录"))
@@ -1532,39 +1928,44 @@ server <- function(input, output, session) {
 
   output$gantt_filters <- renderUI({
     opts <- gantt_filter_options()
+    cm <- isolate({
+      v <- input$gantt_filter_combine_mode
+      if (is.null(v) || !v %in% c("and", "or")) "and" else v
+    })
+    combine_lbl <- if (identical(cm, "and")) "且条件" else "或条件"
     tags$div(
       class = "panel panel-default",
-      style = "margin-bottom: 10px;",
+      style = "margin-bottom: 8px;",
+      tags$div(class = "panel-heading", style = "padding: 8px 12px; font-size: 14px;", tags$b("筛选与刷新")),
       tags$div(
-        class = "panel-heading",
-        style = "cursor: pointer;",
-        role = "button",
-        `data-toggle` = "collapse",
-        `data-target` = "#ganttFilterCollapse",
-        `aria-expanded` = "false",
-        `aria-controls` = "ganttFilterCollapse",
-        tags$span(class = "glyphicon glyphicon-chevron-right", style = "margin-right: 6px;"),
-        tags$span("筛选与刷新")
-      ),
-      tags$div(
-        id = "ganttFilterCollapse",
-        class = "panel-collapse collapse",
+        class = "panel-body",
+        style = "padding: 10px 12px;",
         tags$div(
-          class = "panel-body",
-          actionButton("gantt_refresh", "🔄 从数据库刷新", class = "btn-primary", style = "margin-bottom: 10px;"),
-          if (!is.null(opts)) fluidRow(
-            column(3, selectInput("filter_type", "项目类型", choices = opts$types, multiple = TRUE, selectize = TRUE)),
-            column(3, selectInput("filter_name", "项目名称", choices = opts$names, multiple = TRUE, selectize = TRUE)),
-            column(3, selectInput("filter_manager", "项目负责人", choices = opts$managers, multiple = TRUE, selectize = TRUE)),
-            column(3, selectInput("filter_participant", "项目参与人员", choices = opts$participants, multiple = TRUE, selectize = TRUE))
+          style = "display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;",
+          actionButton("gantt_refresh", "🔄 从数据库刷新", class = "btn btn-primary", style = "margin: 0;"),
+          tags$button(
+            type = "button",
+            id = "gantt_filter_combine_btn",
+            class = "btn btn-default",
+            style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
+            `data-mode` = cm,
+            combine_lbl
           ),
-          if (!is.null(opts)) fluidRow(
-            column(3, selectInput("filter_importance", "重要紧急程度", choices = opts$importance, multiple = TRUE, selectize = TRUE)),
-            column(3, selectInput("filter_hospital", "相关医院（有中心）", choices = opts$hospitals, multiple = TRUE, selectize = TRUE)),
-            column(3, div(
-              style = "margin-top: 10px; font-size: 16px; min-height: 38px; display: flex; align-items: center;",
-              checkboxInput("filter_include_archived", "包含已结题项目", value = FALSE)
-            ))
+          tags$span(
+            style = "font-size: 12px; color: #666; flex: 1; min-width: 120px;",
+            "维度叠加；各栏多选为「或」"
+          )
+        ),
+        if (!is.null(opts)) tagList(
+          selectInput("filter_type", "项目类型", choices = opts$types, multiple = TRUE, selectize = TRUE, width = "100%"),
+          selectInput("filter_name", "项目名称", choices = opts$names, multiple = TRUE, selectize = TRUE, width = "100%"),
+          selectInput("filter_manager", "项目负责人", choices = opts$managers, multiple = TRUE, selectize = TRUE, width = "100%"),
+          selectInput("filter_participant", "项目参与人员", choices = opts$participants, multiple = TRUE, selectize = TRUE, width = "100%"),
+          selectInput("filter_importance", "重要紧急程度", choices = opts$importance, multiple = TRUE, selectize = TRUE, width = "100%"),
+          selectInput("filter_hospital", "相关医院（有中心）", choices = opts$hospitals, multiple = TRUE, selectize = TRUE, width = "100%"),
+        div(
+            style = "margin-top: 6px; font-size: 14px;",
+            checkboxInput("filter_include_archived", "包含已结题项目", value = FALSE)
           )
         )
       )
@@ -1572,6 +1973,7 @@ server <- function(input, output, session) {
   })
 
   gantt_data_db <- reactive({
+    today <- Sys.Date()   # 每次执行取实时日期
     state <- gantt_filter_state_debounced()
     current_user_auth()
     gantt_db_error(NULL)
@@ -1610,46 +2012,16 @@ server <- function(input, output, session) {
 
       where_stage <- c('project_id IS NOT NULL', 'project_type IS NOT NULL')
       if (!auth$allow_all) where_stage <- c(where_stage, paste0("project_db_id IN (", auth$allowed_subquery, ")"))
-      params_stage <- list()
-      make_placeholder_csv <- function(n, start_idx) {
-        paste(sprintf("$%d", start_idx + seq_len(n) - 1L), collapse = ",")
+      dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp)
+      combine_mode <- if (is.null(state$combine_mode)) "and" else state$combine_mode
+      if (length(dim_built$dim_parts) > 0L) {
+        if (identical(combine_mode, "or")) {
+          where_stage <- c(where_stage, paste0("(", paste(dim_built$dim_parts, collapse = " OR "), ")"))
+        } else {
+          where_stage <- c(where_stage, dim_built$dim_parts)
+        }
       }
-      p <- 0L
-      if (length(ft) > 0) {
-        ph <- make_placeholder_csv(length(ft), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_type IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(ft))
-        p <- p + length(ft)
-      }
-      if (length(fn) > 0) {
-        ph <- make_placeholder_csv(length(fn), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_id IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(fn))
-        p <- p + length(fn)
-      }
-      if (length(manager_ids) > 0) {
-        ph <- make_placeholder_csv(length(manager_ids), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_db_id IN (SELECT id FROM public.\"04项目总表\" WHERE \"05人员表_id\" IN (%s))", ph))
-        params_stage <- c(params_stage, as.list(manager_ids))
-        p <- p + length(manager_ids)
-      }
-      if (length(proj_ids_participant) > 0) {
-        ph <- make_placeholder_csv(length(proj_ids_participant), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_db_id IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(proj_ids_participant))
-        p <- p + length(proj_ids_participant)
-      }
-      if (length(fi) > 0) {
-        ph <- make_placeholder_csv(length(fi), p + 1L)
-        where_stage <- c(where_stage, sprintf("\"重要紧急程度\" IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(fi))
-        p <- p + length(fi)
-      }
-      if (length(proj_ids_hosp) > 0) {
-        ph <- make_placeholder_csv(length(proj_ids_hosp), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_db_id IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(proj_ids_hosp))
-      }
+      params_stage <- dim_built$params_stage
       if (!isTRUE(state$include_archived)) {
         where_stage <- c(where_stage, 'COALESCE(project_is_active, true) = true')
       }
@@ -1673,7 +2045,10 @@ server <- function(input, output, session) {
       stage_rows$planned_end_date <- as.Date(stage_rows$planned_end_date)
       stage_rows$actual_end_date <- as.Date(stage_rows$actual_end_date)
       stage_rows$progress <- norm_progress(stage_rows$progress)
-      stage_rows$is_unplanned <- is.na(stage_rows$start_date) | is.na(stage_rows$planned_end_date)
+      # 计划比对需要计划开始+计划结束同时有效；缺任何一个均视为"未制定计划"（白灰）
+      stage_rows$is_unplanned <- is.na(stage_rows$start_date) |
+        is.na(stage_rows$planned_start_date) |
+        is.na(stage_rows$planned_end_date)
       ss <- stage_catalog()$sync_stages
       site_rows <- stage_rows %>% filter(!task_name %in% ss)
       sync_rows <- stage_rows %>% filter(task_name %in% ss)
@@ -1694,29 +2069,22 @@ server <- function(input, output, session) {
       df$raw_actual_start_date  <- df$actual_start_date
       df$raw_start_date <- df$start_date           # 有效开始（coalesce）
       df$raw_planned_end_date <- df$planned_end_date
+      # 未制定计划：仅在同项目+中心内、按 08 表 stage_ord 顺序，从「当前日期」起每个占 1 个月宽；
+      # 已制定计划的阶段不参与占位，也不推进未制定计划的槽位。
       cur_proj <- ""
       cur_site <- ""
-      anchor <- today
+      slot_unplanned <- today
       for (i in seq_len(nrow(df))) {
         if (df$project_id[i] != cur_proj || df$site_name[i] != cur_site) {
           cur_proj <- df$project_id[i]
           cur_site <- df$site_name[i]
-          anchor <- today
+          slot_unplanned <- today
         }
         if (isTRUE(df$is_unplanned[i])) {
-          df$start_date[i] <- anchor
-          df$planned_end_date[i] <- anchor + 30L
-        }
-        tail_i <- NA
-        if (!is.na(df$actual_end_date[i])) {
-          tail_i <- df$actual_end_date[i]
-        } else if (!is.na(df$planned_end_date[i])) {
-          tail_i <- df$planned_end_date[i]
-        } else if (!is.na(df$start_date[i])) {
-          tail_i <- df$start_date[i]
-        }
-        if (!is.na(tail_i) && tail_i > anchor) {
-          anchor <- tail_i
+          df$planned_start_date[i] <- slot_unplanned
+          df$planned_end_date[i]   <- slot_unplanned + 30L
+          df$start_date[i]         <- slot_unplanned
+          slot_unplanned <- slot_unplanned + 30L
         }
       }
       df %>% select(-stage_ord)
@@ -1728,6 +2096,7 @@ server <- function(input, output, session) {
 
   # 甘特数据源（含未激活阶段），用于自由里程碑展示与占位，使未勾选 is_active 的阶段仍可显示/编辑里程碑
   gantt_data_all_stages <- reactive({
+    today <- Sys.Date()   # 每次执行取实时日期
     state <- gantt_filter_state_debounced()
     current_user_auth()
     if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return(NULL)
@@ -1761,46 +2130,16 @@ server <- function(input, output, session) {
       }
       where_stage <- c('project_id IS NOT NULL', 'project_type IS NOT NULL')
       if (!auth$allow_all) where_stage <- c(where_stage, paste0("project_db_id IN (", auth$allowed_subquery, ")"))
-      params_stage <- list()
-      make_placeholder_csv <- function(n, start_idx) {
-        paste(sprintf("$%d", start_idx + seq_len(n) - 1L), collapse = ",")
+      dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp)
+      combine_mode <- if (is.null(state$combine_mode)) "and" else state$combine_mode
+      if (length(dim_built$dim_parts) > 0L) {
+        if (identical(combine_mode, "or")) {
+          where_stage <- c(where_stage, paste0("(", paste(dim_built$dim_parts, collapse = " OR "), ")"))
+        } else {
+          where_stage <- c(where_stage, dim_built$dim_parts)
+        }
       }
-      p <- 0L
-      if (length(ft) > 0) {
-        ph <- make_placeholder_csv(length(ft), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_type IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(ft))
-        p <- p + length(ft)
-      }
-      if (length(fn) > 0) {
-        ph <- make_placeholder_csv(length(fn), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_id IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(fn))
-        p <- p + length(fn)
-      }
-      if (length(manager_ids) > 0) {
-        ph <- make_placeholder_csv(length(manager_ids), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_db_id IN (SELECT id FROM public.\"04项目总表\" WHERE \"05人员表_id\" IN (%s))", ph))
-        params_stage <- c(params_stage, as.list(manager_ids))
-        p <- p + length(manager_ids)
-      }
-      if (length(proj_ids_participant) > 0) {
-        ph <- make_placeholder_csv(length(proj_ids_participant), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_db_id IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(proj_ids_participant))
-        p <- p + length(proj_ids_participant)
-      }
-      if (length(fi) > 0) {
-        ph <- make_placeholder_csv(length(fi), p + 1L)
-        where_stage <- c(where_stage, sprintf("\"重要紧急程度\" IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(fi))
-        p <- p + length(fi)
-      }
-      if (length(proj_ids_hosp) > 0) {
-        ph <- make_placeholder_csv(length(proj_ids_hosp), p + 1L)
-        where_stage <- c(where_stage, sprintf("project_db_id IN (%s)", ph))
-        params_stage <- c(params_stage, as.list(proj_ids_hosp))
-      }
+      params_stage <- dim_built$params_stage
       if (!isTRUE(state$include_archived)) {
         where_stage <- c(where_stage, 'COALESCE(project_is_active, true) = true')
       }
@@ -1822,7 +2161,10 @@ server <- function(input, output, session) {
       stage_rows$planned_end_date <- as.Date(stage_rows$planned_end_date)
       stage_rows$actual_end_date <- as.Date(stage_rows$actual_end_date)
       stage_rows$progress <- norm_progress(stage_rows$progress)
-      stage_rows$is_unplanned <- is.na(stage_rows$start_date) | is.na(stage_rows$planned_end_date)
+      # 计划比对需要计划开始+计划结束同时有效；缺任何一个均视为"未制定计划"（白灰）
+      stage_rows$is_unplanned <- is.na(stage_rows$start_date) |
+        is.na(stage_rows$planned_start_date) |
+        is.na(stage_rows$planned_end_date)
       ss <- stage_catalog()$sync_stages
       site_rows <- stage_rows %>% filter(!task_name %in% ss)
       sync_rows <- stage_rows %>% filter(task_name %in% ss)
@@ -1845,34 +2187,24 @@ server <- function(input, output, session) {
       df$raw_planned_end_date <- df$planned_end_date
       cur_proj <- ""
       cur_site <- ""
-      anchor <- today
+      slot_unplanned <- today
       for (i in seq_len(nrow(df))) {
         if (df$project_id[i] != cur_proj || df$site_name[i] != cur_site) {
           cur_proj <- df$project_id[i]
           cur_site <- df$site_name[i]
-          anchor <- today
+          slot_unplanned <- today
         }
         if (isTRUE(df$is_unplanned[i])) {
-          df$start_date[i] <- anchor
-          df$planned_end_date[i] <- anchor + 30L
-        }
-        tail_i <- NA
-        if (!is.na(df$actual_end_date[i])) {
-          tail_i <- df$actual_end_date[i]
-        } else if (!is.na(df$planned_end_date[i])) {
-          tail_i <- df$planned_end_date[i]
-        } else if (!is.na(df$start_date[i])) {
-          tail_i <- df$start_date[i]
-        }
-        if (!is.na(tail_i) && tail_i > anchor) {
-          anchor <- tail_i
+          df$planned_start_date[i] <- slot_unplanned
+          df$planned_end_date[i]   <- slot_unplanned + 30L
+          df$start_date[i]         <- slot_unplanned
+          slot_unplanned <- slot_unplanned + 30L
         }
       }
       # 保留 stage_ord 供 processed_data 计算「最后一个阶段」以放置自定义里程碑占位
       df
     }, error = function(e) NULL)
   })
-
   # 当前甘特数据源（仅 DB）
   current_gantt_data <- reactive({
     gantt_data_db()
@@ -1885,6 +2217,7 @@ server <- function(input, output, session) {
 
   # ----- 甘特图 -----
   processed_data <- reactive({
+    today <- Sys.Date()   # 每次执行取实时日期（进度条颜色/位置计算基准）
     gd <- current_gantt_data()
     if (is.null(gd) || nrow(gd) == 0) return(list(items = data.frame(), groups = data.frame()))
     # 避免 bind_rows 时 pq_jsonb 与缺失列类型冲突：将 JSON 列统一为 character
@@ -1894,6 +2227,9 @@ server <- function(input, output, session) {
     if (!"project_type" %in% names(gd)) gd$project_type <- NA_character_
     if (!"manager_name" %in% names(gd)) gd$manager_name <- NA_character_
     ss <- sync_stages_current()
+    # 提前获取全阶段数据（含 is_active=FALSE 的阶段），用于后续补全因所有阶段均未激活而消失的子中心行
+    gd_all <- gantt_data_all_stages()
+    gd_milestone <- if (is.null(gd_all) || nrow(gd_all) == 0) gd else gd_all
     groups_centers <- gd %>%
       filter(!task_name %in% ss) %>%
       group_by(project_id, site_name) %>%
@@ -1906,10 +2242,32 @@ server <- function(input, output, session) {
       arrange(project_id, site_name) %>%
       mutate(
         id = paste0(project_id, "_", site_name),
-        line1 = if_else(!is.na(project_type) & nzchar(project_type), paste0(project_type, "-", project_id), project_id),
-        content = sprintf("<div style='padding:6px; font-size:14px;'><b>%s</b><br><span style='color:#666; font-size:13px;'>%s</span></div>", line1, site_name)
-      ) %>%
-      select(-line1)
+        content = sprintf("<div style='padding:2px 6px; font-size:13px;'>%s</div>", site_name)
+      )
+    # 补全：将 gd_all 中存在、但因所有阶段均未激活而在 gd 中缺失的子中心也加入 groups_centers，
+    # 确保即使该中心没有任何活跃进度条，里程碑仍有对应的甘特行可以挂载，不会导致渲染崩溃
+    if (!is.null(gd_milestone) && nrow(gd_milestone) > 0) {
+      existing_center_ids <- paste0(groups_centers$project_id, "_", groups_centers$site_name)
+      missing_centers <- gd_milestone %>%
+        filter(!task_name %in% ss) %>%
+        mutate(center_id = paste0(project_id, "_", site_name)) %>%
+        filter(!center_id %in% existing_center_ids) %>%
+        group_by(project_id, site_name) %>%
+        summarise(
+          avg_p = 0,
+          project_type = first(project_type),
+          importance = { x <- suppressWarnings(na.omit(`重要紧急程度`)); if (length(x) == 0) NA_character_ else x[1] },
+          .groups = "drop"
+        ) %>%
+        mutate(
+          id = paste0(project_id, "_", site_name),
+          content = sprintf("<div style='padding:2px 6px; font-size:13px;'>%s</div>", site_name)
+        )
+      if (nrow(missing_centers) > 0) {
+        groups_centers <- bind_rows(groups_centers, missing_centers) %>%
+          arrange(project_id, site_name)
+      }
+    }
     
     # 创建同步阶段组（每个项目一个），行名下方显示项目负责人
     groups_sync <- gd %>%
@@ -1925,56 +2283,76 @@ server <- function(input, output, session) {
       arrange(project_id) %>%
       mutate(
         id = paste0(project_id, "_同步阶段"),
-        line1 = if_else(!is.na(project_type) & nzchar(project_type), paste0(project_type, "-", project_id), project_id),
-        mgr_line = if_else(!is.na(manager_name) & nzchar(trimws(as.character(manager_name))), sprintf("<br><span style='color:#888; font-size:13px;'>项目负责人：%s</span>", as.character(manager_name)), ""),
-        content = sprintf("<div style='padding:6px; font-size:14px;'><b>%s</b><br><span style='color:#666; font-size:13px;'>%s</span>%s</div>", line1, "各中心同步阶段", mgr_line)
+        mgr_line = if_else(
+          !is.na(manager_name) & nzchar(trimws(as.character(manager_name))),
+          sprintf("<br><span style='color:#888; font-size:12px;'>项目负责人：%s</span>",
+                  as.character(manager_name)), ""),
+        content = sprintf(
+          "<div style='padding:2px 6px; font-size:13px; line-height:1.35;'>各中心同步阶段%s</div>",
+          mgr_line
+        )
       ) %>%
-      select(-line1, -mgr_line)
+      select(-mgr_line)
     
     # 合并所有组，同步阶段放在每个项目的第一个位置
     groups_data <- bind_rows(groups_sync, groups_centers) %>%
       arrange(project_id, desc(id == paste0(project_id, "_同步阶段")), site_name)
     
-    # 在每个项目之间插入 mock project 作为分割线
-    unique_projects <- unique(groups_data$project_id)
-    if (length(unique_projects) > 1) {
-      # 为每个项目（除了最后一个）创建一个 mock project 组
-      mock_groups <- tibble()
-      for (i in 1:(length(unique_projects) - 1)) {
-        mock_id <- paste0("MOCK_SEPARATOR_", i)
-        mock_groups <- bind_rows(
-          mock_groups,
-          tibble(
-            project_id = paste0("MOCK_", unique_projects[i]),
-            id = mock_id,
-            content = "<div style='background-color:#E0E0E0; height:4px; padding:0;'></div>",
-            avg_p = 0,
-            site_name = NA_character_
-          )
-        )
-      }
-      
-      # 将 mock groups 插入到 groups_data 中
-      all_groups_list <- list()
-      for (i in seq_along(unique_projects)) {
-        # 添加当前项目的所有组
-        project_groups <- groups_data %>% filter(project_id == unique_projects[i])
-        all_groups_list[[length(all_groups_list) + 1]] <- project_groups
-        
-        # 如果不是最后一个项目，插入 mock project
-        if (i < length(unique_projects)) {
-          mock_group <- mock_groups %>% filter(grepl(paste0("MOCK_", unique_projects[i]), project_id))
-          if (nrow(mock_group) > 0) {
-            all_groups_list[[length(all_groups_list) + 1]] <- mock_group
-          }
+    # 为每个项目生成标题行（插入到该项目所有行之前）
+    # R端硬截断：按显示宽度(type="width")累计，超限直接加省略号
+    truncate_label <- function(txt, max_u = 30L) {
+      txt <- as.character(txt %||% "")
+      chars <- strsplit(txt, "", fixed = TRUE)[[1]]
+      units <- 0L
+      for (k in seq_along(chars)) {
+        units <- units + nchar(chars[k], type = "width", allowNA = TRUE, keepNA = FALSE)
+        if (units > max_u) {
+          keep <- if (k <= 1L) "" else paste(chars[seq_len(k - 1L)], collapse = "")
+          return(paste0(keep, ".."))
         }
       }
-      groups_data <- bind_rows(all_groups_list)
+      txt
     }
+    proj_headers <- groups_sync %>%
+      mutate(
+        orig_pid    = project_id,
+        hdr_line1   = if_else(!is.na(project_type) & nzchar(project_type),
+                              paste0(project_type, "-", project_id), project_id),
+        hdr_imp_txt = if_else(!is.na(importance) & nzchar(importance),
+                              paste0(" \u00b7 ", importance), ""),
+        hdr_mgr_txt = if_else(!is.na(manager_name) & nzchar(trimws(as.character(manager_name))),
+                              paste0(" \u00b7 \u8d1f\u8d23\u4eba\uff1a", as.character(manager_name)), ""),
+        title       = paste0(hdr_line1, hdr_imp_txt, hdr_mgr_txt),
+        hdr_display = sapply(hdr_line1, truncate_label, USE.NAMES = FALSE),
+        content     = sprintf(
+          "<div style='padding:0;margin:0;font-size:14px;line-height:1.2;white-space:nowrap;'><strong>%s</strong></div>",
+          hdr_display
+        ),
+        className   = "gantt-row-sep",
+        style       = "font-weight: 900; font-size: 14px; background-color: #B7BEC7; color: #1F2933;",
+        id          = paste0("MOCK_SEPARATOR_", project_id),
+        project_id  = paste0("HDR_", orig_pid),
+        avg_p       = 0,
+        site_name   = NA_character_
+      ) %>%
+      select(orig_pid, project_id, id, content, title, className, style, avg_p, site_name)
+
+    # 将每个项目的标题行插入到该项目所有行之前
+    unique_projects <- unique(groups_data$project_id)
+    all_groups_list <- list()
+    for (i in seq_along(unique_projects)) {
+      proj_id        <- unique_projects[i]
+      hdr            <- proj_headers %>% filter(orig_pid == proj_id) %>% select(-orig_pid)
+      project_groups <- groups_data %>% filter(project_id == proj_id)
+      if (nrow(hdr) > 0) all_groups_list[[length(all_groups_list) + 1]] <- hdr
+      all_groups_list[[length(all_groups_list) + 1]] <- project_groups
+    }
+    groups_data <- bind_rows(all_groups_list)
     
     # 按“重要紧急程度”设置行背景浅色（替代原白/灰交替）
     groups_data <- groups_data %>% mutate(
       className = case_when(
+        !is.na(className) & nzchar(className) ~ className,
         grepl("MOCK_SEPARATOR", id) ~ "gantt-row-sep",
         !is.null(importance) & importance == "重要紧急" ~ "gantt-bg-重要紧急",
         !is.null(importance) & importance == "重要不紧急" ~ "gantt-bg-重要不紧急",
@@ -1990,19 +2368,24 @@ server <- function(input, output, session) {
         id = row_number(),
         group = paste0(project_id, "_", site_name),
         
-        # 分母：计划周期 = 计划结束 - 计划开始（固定基准）
-        planned_duration = as.numeric(planned_end_date - planned_start_date),
+        # 分母：计划周期；未制定计划在数据层已写满 30 天虚拟计划
+        planned_duration = dplyr::if_else(is_unplanned, 30.0, as.numeric(planned_end_date - planned_start_date)),
         is_completed = !is.na(actual_end_date),
-        # 分子：实际周期 = (实际结束 或 今天) - 实际开始（actual_start 有则用，否则退回 planned_start）
-        # start_date = COALESCE(actual_start_date, planned_start_date)，正好满足此逻辑
+        plan_no_actual_start = !is_unplanned & is.na(actual_start_date) &
+          !is.na(planned_start_date) & !is.na(planned_end_date) & is.na(actual_end_date),
+        # 分子：实际周期 = (实际结束 或 今天) - 有效开始；无实际开始且已制定计划时，时间进度视为 0（与「未开始」语义一致）
         planned_progress = ifelse(
-          is_completed,
+          plan_no_actual_start,
+          0.0,
+          ifelse(
+            is_completed,
             ifelse(planned_duration > 0,
                    as.numeric(actual_end_date - start_date) / planned_duration,
                    1.0),
-          ifelse(planned_duration > 0,
-                 as.numeric(today - start_date) / planned_duration,
-                 ifelse(today >= start_date, 1.0, 0.0))
+            ifelse(planned_duration > 0,
+                   as.numeric(today - start_date) / planned_duration,
+                   ifelse(today >= start_date, 1.0, 0.0))
+          )
         ),
         actual_progress = ifelse(is_completed, 1.0, progress),
         progress_diff = actual_progress - planned_progress,
@@ -2020,7 +2403,9 @@ server <- function(input, output, session) {
         ),
         
         # --- 灰态判定：未制定计划(白灰) > 未开始(深灰) > 其他 ---
-        is_not_started = (today < start_date & progress == 0 & is.na(actual_end_date)),
+        # 未开始(深灰)：① plan_no_actual_start ② 今天早于有效开始且进度为 0 且未完成
+        is_not_started = plan_no_actual_start |
+          (!is_unplanned & today < start_date & progress == 0 & is.na(actual_end_date)),
         missing_actual_done = is.na(actual_end_date) & progress >= 1.0,
         bg_color = case_when(
           is_unplanned ~ "#EDEDED",
@@ -2035,7 +2420,7 @@ server <- function(input, output, session) {
           progress_diff >= 0.25 ~ "#4CAF50",
           TRUE ~ "#9E9E9E"
         ),
-        border_color = if_else(is_unplanned, "#BDBDBD", bg_color),
+        border_color = if_else(is_unplanned, "#D0D0D0", bg_color),
         text_color = ifelse(
           is_unplanned, "#555555",
           ifelse(
@@ -2050,18 +2435,23 @@ server <- function(input, output, session) {
           )
         ),
         style = ifelse(is_unplanned,
-          sprintf("background-color: %s; border-color: %s; color: %s; border-width: 2px; border-style: solid;", bg_color, border_color, text_color),
+          sprintf("background-color: %s; border-color: %s; color: %s; border-width: 1px; border-style: solid;", bg_color, border_color, text_color),
           sprintf("background-color: %s; border-color: %s; color: %s; border-width: 2px;", bg_color, border_color, text_color)),
         type = "range",
-        start = start_date,
-        end = ifelse(
-            !is.na(actual_end_date),
-            as.character(actual_end_date),
-            ifelse(
-              today > planned_end_date,
-              as.character(today),
-              as.character(planned_end_date)
-          )
+        # start：start_date 为 NA（完全无日期）时退回 today，避免 vis.js 收到 null 后位置崩掉
+        start = dplyr::if_else(is.na(start_date), today, start_date),
+        # 未制定计划：条长固定为数据层写入的虚拟计划区间，不受实际日期影响
+        theoretical_end = dplyr::case_when(
+          is_unplanned ~ planned_end_date,
+          !is.na(actual_start_date) & !is.na(planned_start_date) & !is.na(planned_end_date) ~
+            actual_start_date + as.numeric(planned_end_date - planned_start_date),
+          TRUE ~ planned_end_date
+        ),
+        end = dplyr::case_when(
+          is_unplanned ~ as.character(dplyr::coalesce(planned_end_date, start_date + 30L)),
+          !is.na(actual_end_date) ~ as.character(actual_end_date),
+          today > theoretical_end ~ as.character(today),
+          TRUE ~ as.character(theoretical_end)
         ),
         content = paste0(vapply(task_name, stage_label_for_key, character(1)), ifelse(is_unplanned, " (未制定计划)", ""), " ", ifelse(!is.na(actual_end_date), 100, round(progress * 100, 0)), "%")
       )
@@ -2072,6 +2462,7 @@ server <- function(input, output, session) {
       group_by(project_id, task_name) %>%
       summarise(
         start_date = first(start_date),
+        actual_start_date = first(actual_start_date),
         planned_start_date = first(planned_start_date),
         planned_end_date = first(planned_end_date),
         actual_end_date = first(actual_end_date),
@@ -2084,18 +2475,22 @@ server <- function(input, output, session) {
         id = max(items_centers$id, 0) + row_number(),
         group = paste0(project_id, "_同步阶段"),
         
-        # 分母：计划周期 = 计划结束 - 计划开始（固定基准）
-        planned_duration = as.numeric(planned_end_date - planned_start_date),
+        planned_duration = dplyr::if_else(is_unplanned, 30.0, as.numeric(planned_end_date - planned_start_date)),
         is_completed = !is.na(actual_end_date),
-        # 分子：start_date = COALESCE(actual_start_date, planned_start_date)
+        plan_no_actual_start = !is_unplanned & is.na(actual_start_date) &
+          !is.na(planned_start_date) & !is.na(planned_end_date) & is.na(actual_end_date),
         planned_progress = ifelse(
-          is_completed,
+          plan_no_actual_start,
+          0.0,
+          ifelse(
+            is_completed,
             ifelse(planned_duration > 0,
                    as.numeric(actual_end_date - start_date) / planned_duration,
                    1.0),
-          ifelse(planned_duration > 0,
-                 as.numeric(today - start_date) / planned_duration,
-                 ifelse(today >= start_date, 1.0, 0.0))
+            ifelse(planned_duration > 0,
+                   as.numeric(today - start_date) / planned_duration,
+                   ifelse(today >= start_date, 1.0, 0.0))
+          )
         ),
         actual_progress = ifelse(is_completed, 1.0, progress),
         progress_diff = actual_progress - planned_progress,
@@ -2112,7 +2507,8 @@ server <- function(input, output, session) {
           progress_diff >= 0.25 ~ "超前25%以上"
         ),
         
-        is_not_started = (today < start_date & progress == 0 & is.na(actual_end_date)),
+        is_not_started = plan_no_actual_start |
+          (!is_unplanned & today < start_date & progress == 0 & is.na(actual_end_date)),
         missing_actual_done = is.na(actual_end_date) & progress >= 1.0,
         bg_color = case_when(
           is_unplanned ~ "#EDEDED",
@@ -2127,7 +2523,7 @@ server <- function(input, output, session) {
           progress_diff >= 0.25 ~ "#4CAF50",
           TRUE ~ "#9E9E9E"
         ),
-        border_color = if_else(is_unplanned, "#BDBDBD", bg_color),
+        border_color = if_else(is_unplanned, "#D0D0D0", bg_color),
         text_color = ifelse(
           is_unplanned, "#555555",
           ifelse(
@@ -2140,18 +2536,21 @@ server <- function(input, output, session) {
           )
         ),
         style = ifelse(is_unplanned,
-          sprintf("background-color: %s; border-color: %s; color: %s; border-width: 2px; border-style: solid;", bg_color, border_color, text_color),
+          sprintf("background-color: %s; border-color: %s; color: %s; border-width: 1px; border-style: solid;", bg_color, border_color, text_color),
           sprintf("background-color: %s; border-color: %s; color: %s; border-width: 2px;", bg_color, border_color, text_color)),
         type = "range",
-        start = start_date,
-        end = ifelse(
-            !is.na(actual_end_date),
-            as.character(actual_end_date),
-            ifelse(
-              today > planned_end_date,
-              as.character(today),
-              as.character(planned_end_date)
-          )
+        start = dplyr::if_else(is.na(start_date), today, start_date),
+        theoretical_end = dplyr::case_when(
+          is_unplanned ~ planned_end_date,
+          !is.na(actual_start_date) & !is.na(planned_start_date) & !is.na(planned_end_date) ~
+            actual_start_date + as.numeric(planned_end_date - planned_start_date),
+          TRUE ~ planned_end_date
+        ),
+        end = dplyr::case_when(
+          is_unplanned ~ as.character(dplyr::coalesce(planned_end_date, start_date + 30L)),
+          !is.na(actual_end_date) ~ as.character(actual_end_date),
+          today > theoretical_end ~ as.character(today),
+          TRUE ~ as.character(theoretical_end)
         ),
         content = paste0(vapply(task_name, stage_label_for_key, character(1)), ifelse(is_unplanned, " (未制定计划)", ""), " ", ifelse(!is.na(actual_end_date), 100, round(progress * 100, 0)), "%")
       )
@@ -2181,7 +2580,7 @@ server <- function(input, output, session) {
           new_start = min_date,
           new_end = as.character(max_date),
           new_content = "",
-          new_style = "background-color: #E0E0E0 !important; border: none !important; height: 4px !important;",
+          new_style = "background-color: transparent !important; border: none !important; pointer-events: none !important; opacity: 0 !important;",
           new_type = "range"
         ) %>%
         select(id = new_id, group = new_group, start = new_start, end = new_end, 
@@ -2193,120 +2592,147 @@ server <- function(input, output, session) {
     }
 
     # -------- 自由里程碑：从阶段实例中的里程碑 JSON 解析，并生成 milestone items --------
-    # 使用含未激活阶段的数据源 gd_all，使未勾选 is_active 的阶段仍能显示/编辑里程碑；每阶段一行均有一个「自定义里程碑」入口
+    # gd_all / gd_milestone 已在函数顶部计算（用于补全缺失子中心行），此处直接复用
     milestone_items <- list()
     site_stage_keys <- stage_catalog()$site_stages
-    gd_all <- gantt_data_all_stages()
-    gd_milestone <- if (is.null(gd_all) || nrow(gd_all) == 0) gd else gd_all
     if (nrow(gd_milestone) > 0) {
       cur_ms_id <- if (nrow(items_data) > 0) max(items_data$id, na.rm = TRUE) + 1L else 1L
-      seen_sync_stage <- character(0)
-        sync_with_ms <- character(0)
-        site_with_ms <- character(0)
-        
+      seen_sync_proj <- character(0)   # 每个项目只读一次同步里程碑
+      seen_site_proj <- character(0)   # 每个项目+子中心只读一次子中心里程碑
+      sync_with_ms <- character(0)
+      site_with_ms <- character(0)
+
       for (ri in seq_len(nrow(gd_milestone))) {
         row <- gd_milestone[ri, ]
-          pid <- row$project_id
-          sname <- row$site_name
+        pid   <- row$project_id
+        sname <- row$site_name
         is_sync_row <- row$task_name %in% ss
-          
-          if (is_sync_row) {
-            sync_key <- paste(pid, as.character(row$task_name), sep = "||")
-            if (sync_key %in% seen_sync_stage) next
-            seen_sync_stage <- union(seen_sync_stage, sync_key)
-          }
 
-        group_id <- if (is_sync_row) paste0(pid, "_同步阶段") else paste0(pid, "_", sname)
-        ms_json <- if ("milestones_json" %in% names(row)) row$milestones_json else NULL
-          this_stage_has_ms <- FALSE
+        # 同一项目/子中心的 milestones_json 完全相同，只需处理一次
+        if (is_sync_row) {
+          if (as.character(pid) %in% seen_sync_proj) next
+          seen_sync_proj <- union(seen_sync_proj, as.character(pid))
+        } else {
+          site_key <- paste(pid, sname, sep = "||")
+          if (site_key %in% seen_site_proj) next
+          seen_site_proj <- union(seen_site_proj, site_key)
+        }
 
-          if (!is.null(ms_json) && !is.na(ms_json)) {
-            ms_df_current <- parse_milestone_json_to_df(ms_json)
-            if (nrow(ms_df_current) > 0) {
-              ms_df_current <- ms_df_current[ms_df_current$stage_key == as.character(row$task_name), , drop = FALSE]
-              for (mi in seq_len(nrow(ms_df_current))) {
-                ms_name <- ms_df_current$name[mi]
-                plan_str <- ifelse(nzchar(ms_df_current$plan[mi]), ms_df_current$plan[mi], "无")
-                act_str <- ifelse(nzchar(ms_df_current$actual[mi]), ms_df_current$actual[mi], "无")
+        group_id  <- if (is_sync_row) paste0(pid, "_同步阶段") else paste0(pid, "_", sname)
+        ms_json   <- if ("milestones_json" %in% names(row)) row$milestones_json else NULL
+        this_has_ms <- FALSE
 
-                if (!identical(plan_str, "无")) {
-                  this_stage_has_ms <- TRUE
-                  milestone_items[[length(milestone_items) + 1]] <- data.frame(
-                    id = cur_ms_id,
-                    group = group_id,
-                    start = plan_str,
-                    end = NA,
-                    content = paste0(ms_name, "（计划）"),
-                    style = "color:#0D47A1; border-color:#1976D2; background-color:#BBDEFB;",
-                    type = "point",
-                    milestone_name = ms_name,
-                    milestone_kind = "plan",
-                  milestone_stage_key = as.character(row$task_name),
-                    stringsAsFactors = FALSE
-                  )
-                  cur_ms_id <- cur_ms_id + 1L
-                }
-                if (!identical(act_str, "无")) {
-                  this_stage_has_ms <- TRUE
-                  milestone_items[[length(milestone_items) + 1]] <- data.frame(
-                    id = cur_ms_id,
-                    group = group_id,
-                    start = act_str,
-                    end = NA,
-                    content = paste0(ms_name, "（实际）"),
-                    style = "color:#1B5E20; border-color:#388E3C; background-color:#C8E6C9;",
-                    type = "point",
-                    milestone_name = ms_name,
-                    milestone_kind = "actual",
-                  milestone_stage_key = as.character(row$task_name),
-                    stringsAsFactors = FALSE
-                  )
-                  cur_ms_id <- cur_ms_id + 1L
-                }
-              }
+        if (!is.null(ms_json) && !is.na(ms_json)) {
+          ms_df_current <- parse_milestone_json_to_df(ms_json)
+          for (mi in seq_len(nrow(ms_df_current))) {
+            ms_name  <- ms_df_current$name[mi]
+            plan_str <- ifelse(nzchar(ms_df_current$plan[mi]),   ms_df_current$plan[mi],   "无")
+            act_str  <- ifelse(nzchar(ms_df_current$actual[mi]), ms_df_current$actual[mi], "无")
+
+            if (!identical(plan_str, "无")) {
+              this_has_ms <- TRUE
+              milestone_items[[length(milestone_items) + 1]] <- data.frame(
+                id = cur_ms_id, group = group_id,
+                start = plan_str, end = NA,
+                content = paste0(ms_name, "（计划）"),
+                style = "color:#0D47A1; border-color:#1976D2; background-color:#BBDEFB;",
+                type = "point", milestone_name = ms_name, milestone_kind = "plan",
+                milestone_stage_key = NA_character_, stringsAsFactors = FALSE
+              )
+              cur_ms_id <- cur_ms_id + 1L
             }
-          }
-          if (this_stage_has_ms) {
-            if (is_sync_row) {
-              sync_with_ms <- union(sync_with_ms, as.character(pid))
-            } else {
-              site_with_ms <- union(site_with_ms, paste(pid, sname, sep = "||"))
+            if (!identical(act_str, "无")) {
+              this_has_ms <- TRUE
+              milestone_items[[length(milestone_items) + 1]] <- data.frame(
+                id = cur_ms_id, group = group_id,
+                start = act_str, end = NA,
+                content = paste0(ms_name, "（实际）"),
+                style = "color:#1B5E20; border-color:#388E3C; background-color:#C8E6C9;",
+                type = "point", milestone_name = ms_name, milestone_kind = "actual",
+                milestone_stage_key = NA_character_, stringsAsFactors = FALSE
+              )
+              cur_ms_id <- cur_ms_id + 1L
             }
           }
         }
+        if (this_has_ms) {
+          if (is_sync_row) {
+            sync_with_ms <- union(sync_with_ms, as.character(pid))
+          } else {
+            site_with_ms <- union(site_with_ms, paste(pid, sname, sep = "||"))
+          }
+        }
+      }
 
       # 每个子进程（每组）仅一个「自定义里程碑」入口，跟在最后一个阶段后面；本组已有里程碑则不显示占位
+      # 「自定义里程碑」占位仅按已激活阶段定位，避免未激活阶段将日期推迟
+      # 用 gd（仅含活跃阶段）做 semi_join 过滤基准
+      active_sync_keys <- gd %>% filter(task_name %in% ss) %>% distinct(project_id, task_name)
+      active_site_keys <- gd %>% filter(!task_name %in% ss) %>% distinct(project_id, site_name, task_name)
       if ("stage_ord" %in% names(gd_milestone)) {
         last_sync_stage <- gd_milestone %>%
           filter(task_name %in% ss) %>%
+          semi_join(active_sync_keys, by = c("project_id", "task_name")) %>%
           group_by(project_id) %>%
           summarise(last_task_name = task_name[which.max(stage_ord)][1], .groups = "drop")
         last_site_stage <- gd_milestone %>%
           filter(task_name %in% site_stage_keys) %>%
+          semi_join(active_site_keys, by = c("project_id", "site_name", "task_name")) %>%
           group_by(project_id, site_name) %>%
           summarise(last_task_name = task_name[which.max(stage_ord)][1], .groups = "drop")
+        # 兜底：全部阶段均未激活的子中心没有 active 行，用 gd_milestone 全量取最大阶段
+        last_site_stage_inactive_only <- gd_milestone %>%
+          filter(task_name %in% site_stage_keys) %>%
+          group_by(project_id, site_name) %>%
+          summarise(last_task_name = task_name[which.max(stage_ord)][1], .groups = "drop") %>%
+          anti_join(last_site_stage, by = c("project_id", "site_name"))
+        last_site_stage <- bind_rows(last_site_stage, last_site_stage_inactive_only)
       } else {
         last_sync_stage <- gd_milestone %>%
           filter(task_name %in% ss) %>%
+          semi_join(active_sync_keys, by = c("project_id", "task_name")) %>%
           mutate(ord = match(task_name, ss)) %>%
           group_by(project_id) %>%
           summarise(last_task_name = task_name[which.max(ord)[1]], .groups = "drop")
         last_site_stage <- gd_milestone %>%
           filter(task_name %in% site_stage_keys) %>%
+          semi_join(active_site_keys, by = c("project_id", "site_name", "task_name")) %>%
           mutate(ord = match(task_name, site_stage_keys)) %>%
           group_by(project_id, site_name) %>%
           summarise(last_task_name = task_name[which.max(ord)[1]], .groups = "drop")
+        last_site_stage_inactive_only <- gd_milestone %>%
+          filter(task_name %in% site_stage_keys) %>%
+          mutate(ord = match(task_name, site_stage_keys)) %>%
+          group_by(project_id, site_name) %>%
+          summarise(last_task_name = task_name[which.max(ord)[1]], .groups = "drop") %>%
+          anti_join(last_site_stage, by = c("project_id", "site_name"))
+        last_site_stage <- bind_rows(last_site_stage, last_site_stage_inactive_only)
       }
+      # 日期查找专用辅助函数：从活跃数据集 gd 中取日期，绝不碰 inactive 阶段
+      pick_placeholder_date <- function(rows_active) {
+        # rows_active: 已按 project+site 过滤的 gd 行（只含活跃阶段）
+        if (is.null(rows_active) || nrow(rows_active) == 0) return(today)
+        d <- rows_active$actual_end_date[1]
+        if (is.na(d) || is.null(d)) d <- rows_active$planned_end_date[1]
+        if (!is.na(d) && !is.null(d)) return(d)
+        # 最后一个活跃阶段没有日期：取所有活跃阶段日期中最大值
+        all_dates <- suppressWarnings(as.Date(c(
+          rows_active$actual_end_date, rows_active$planned_end_date
+        )))
+        all_dates <- all_dates[!is.na(all_dates)]
+        if (length(all_dates) > 0) max(all_dates) else today
+      }
+
           for (k in seq_len(nrow(last_sync_stage))) {
-            lp <- last_sync_stage$project_id[k]
+            lp        <- last_sync_stage$project_id[k]
             last_task <- last_sync_stage$last_task_name[k]
             if (lp %in% sync_with_ms) next
-        idx <- which(gd_milestone$project_id == lp & gd_milestone$task_name == last_task & gd_milestone$task_name %in% ss)[1]
-            if (is.na(idx)) next
-        row_k <- gd_milestone[idx, ]
-        end_date <- row_k$actual_end_date
-        if (is.na(end_date) || is.null(end_date)) end_date <- row_k$planned_end_date
-        if (is.na(end_date) || is.null(end_date)) end_date <- today
+        # 只从活跃阶段数据（gd）中取日期，彻底排除 inactive 阶段影响
+        active_sync_rows <- gd %>%
+          filter(project_id == lp, task_name %in% ss) %>%
+          { tryCatch(arrange(., desc(coalesce(actual_end_date, planned_end_date))), error = function(e) .) }
+        last_task_rows <- active_sync_rows %>% filter(task_name == last_task)
+        end_date <- pick_placeholder_date(if (nrow(last_task_rows) > 0) last_task_rows else active_sync_rows)
             milestone_items[[length(milestone_items) + 1]] <- data.frame(
               id = cur_ms_id,
           group = paste0(lp, "_同步阶段"),
@@ -2323,16 +2749,15 @@ server <- function(input, output, session) {
             cur_ms_id <- cur_ms_id + 1L
           }
           for (k in seq_len(nrow(last_site_stage))) {
-            lp <- last_site_stage$project_id[k]
-            ls <- last_site_stage$site_name[k]
+            lp        <- last_site_stage$project_id[k]
+            ls        <- last_site_stage$site_name[k]
             last_task <- last_site_stage$last_task_name[k]
         if (paste(lp, ls, sep = "||") %in% site_with_ms) next
-        idx <- which(gd_milestone$project_id == lp & gd_milestone$site_name == ls & gd_milestone$task_name == last_task & gd_milestone$task_name %in% site_stage_keys)[1]
-            if (is.na(idx)) next
-        row_k <- gd_milestone[idx, ]
-        end_date <- row_k$actual_end_date
-        if (is.na(end_date) || is.null(end_date)) end_date <- row_k$planned_end_date
-        if (is.na(end_date) || is.null(end_date)) end_date <- today
+        active_site_rows <- gd %>%
+          filter(project_id == lp, site_name == ls, !task_name %in% ss) %>%
+          { tryCatch(arrange(., desc(coalesce(actual_end_date, planned_end_date))), error = function(e) .) }
+        last_task_rows <- active_site_rows %>% filter(task_name == last_task)
+        end_date <- pick_placeholder_date(if (nrow(last_task_rows) > 0) last_task_rows else active_site_rows)
             milestone_items[[length(milestone_items) + 1]] <- data.frame(
               id = cur_ms_id,
           group = paste0(lp, "_", ls),
@@ -2372,6 +2797,7 @@ server <- function(input, output, session) {
     tv <- timevis(
       data = data$items,
       groups = data$groups,
+      height = "100%",
       options = list(
         format = list(
           minorLabels = list(month = "M月", year = "YYYY年"),
@@ -2380,7 +2806,8 @@ server <- function(input, output, session) {
         showCurrentTime = TRUE,
         orientation = "top",
         verticalScroll = TRUE,
-        zoomKey = "altKey"
+        zoomKey = "altKey",
+        margin = list(item = list(vertical = 2, horizontal = 4), axis = 4)
       )
     )
     
@@ -2389,7 +2816,11 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$my_gantt_selected, {
+    today <- Sys.Date()   # 每次执行取实时日期（任务详情进度诊断基准）
     req(input$my_gantt_selected)
+    # 每次处理完毕（无论正常返回还是 return() 提前退出）都重置选中状态，
+    # 使下次点击同一控件仍能触发 observeEvent（value NULL → id 视为变化）
+    on.exit(session$sendCustomMessage("resetGanttSelection", "my_gantt"), add = TRUE)
     task_id <- as.numeric(input$my_gantt_selected)
     data <- processed_data()
     task_info <- data$items[data$items$id == task_id, ]
@@ -2407,6 +2838,7 @@ server <- function(input, output, session) {
 
       ss <- sync_stages_current()
       stage_key_clicked <- if ("milestone_stage_key" %in% names(ms_row) && !is.na(ms_row$milestone_stage_key[1])) ms_row$milestone_stage_key[1] else NA_character_
+      has_stage_key <- !is.na(stage_key_clicked) && nzchar(stage_key_clicked)
       # 用含未激活阶段的数据源查找阶段行，使未勾选 is_active 的阶段仍能点开里程碑编辑
       gd_lookup <- gantt_data_all_stages()
       if (is.null(gd_lookup) || nrow(gd_lookup) == 0) gd_lookup <- current_gantt_data()
@@ -2414,12 +2846,12 @@ server <- function(input, output, session) {
       if (is_sync) {
         original_task <- gd_lookup %>%
           filter(project_id == project_id_from_group, task_name %in% ss) %>%
-          { if (nzchar(stage_key_clicked)) filter(., task_name == stage_key_clicked) else . } %>%
+          { if (has_stage_key) filter(., task_name == stage_key_clicked) else . } %>%
           slice(1)
       } else {
         original_task <- gd_lookup %>%
           filter(project_id == project_id_from_group, site_name == site_name_from_group, !task_name %in% ss) %>%
-          { if (nzchar(stage_key_clicked)) filter(., task_name == stage_key_clicked) else . } %>%
+          { if (has_stage_key) filter(., task_name == stage_key_clicked) else . } %>%
           slice(1)
       }
       if (nrow(original_task) == 0) return(NULL)
@@ -2428,31 +2860,24 @@ server <- function(input, output, session) {
       site_row_id <- if ("site_row_id" %in% names(original_task)) original_task$site_row_id[1] else NA_integer_
       stage_instance_id <- if ("stage_instance_id" %in% names(original_task)) original_task$stage_instance_id[1] else NA_integer_
 
-      # 读取现有里程碑 JSON
       ms_json <- if ("milestones_json" %in% names(original_task)) original_task$milestones_json[1] else NULL
-
-      # 解析为 data.frame(entry_key, stage_key, name, plan, actual, note)
-      ms_df <- empty_milestone_df()
-      stage_key <- as.character(original_task$task_name[1])
-      if (!is.null(ms_json) && !is.na(ms_json)) {
-        ms_df <- parse_milestone_json_to_df(ms_json)
-        if (nrow(ms_df) > 0) {
-          ms_df <- ms_df[ms_df$stage_key == stage_key, , drop = FALSE]
-        }
-      }
+      ms_df <- if (!is.null(ms_json) && !is.na(ms_json)) parse_milestone_json_to_df(ms_json) else empty_milestone_df()
+      ms_task_name <- as.character(original_task$task_name[1])
       milestone_row_count(nrow(ms_df))
       task_edit_context(list(
         project_id = project_id_from_group,
         site_name = if (is_sync) "各中心同步阶段" else site_name_from_group,
-        task_name = stage_key,
+        task_name = ms_task_name,
         is_sync = is_sync,
         proj_row_id = proj_row_id,
         site_row_id = site_row_id,
         stage_instance_id = stage_instance_id,
         table_name = "09项目阶段实例表",
+        milestone_table = if (is_sync) "04项目总表" else "03医院_项目表",
+        milestone_row_id = if (is_sync) proj_row_id else as.integer(site_row_id),
         milestones = ms_df,
         milestone_raw = ms_json,
-        milestone_stage_key = stage_key
+        milestone_stage_key = ms_task_name
       ))
 
       # 先展示只读的里程碑概览，再由用户点击进入编辑页
@@ -2548,7 +2973,9 @@ server <- function(input, output, session) {
     tbl_main <- "09项目阶段实例表"
     row_id_main <- stage_instance_id
 
-    snapshot_cols <- c("planned_start_date", "actual_start_date", "planned_end_date", "actual_end_date", "remark_json", "progress", "contributors_json", "milestones_json", "sample_json", "row_version")
+    snapshot_cols <- c("planned_start_date", "actual_start_date", "planned_end_date", "actual_end_date", "remark_json", "progress", "contributors_json", "sample_json", "row_version")
+    ms_tbl_fetch <- if (is_sync) "04项目总表" else "03医院_项目表"
+    ms_id_fetch  <- if (is_sync) proj_row_id else as.integer(site_row_id)
     pt_for_lookup <- if ("project_type" %in% names(original_task)) as.character(original_task$project_type[1]) else NA_character_
     is_s09_task <- stage_supports_sample(as.character(task_info$task_name[1]), pt_for_lookup) && is_sync
     snapshot_row <- if (!is.na(row_id_main) && !is.null(pg_con) && DBI::dbIsValid(pg_con)) {
@@ -2574,7 +3001,12 @@ server <- function(input, output, session) {
     } else {
       empty_contrib_df()
     }
-    milestone_raw <- if (!is.null(snapshot_row) && "milestones_json" %in% names(snapshot_row)) snapshot_row[["milestones_json"]] else NA_character_
+    milestone_raw <- if (!is.na(ms_id_fetch) && !is.null(pg_con) && DBI::dbIsValid(pg_con)) {
+      tryCatch({
+        r <- fetch_row_snapshot(pg_con, ms_tbl_fetch, ms_id_fetch, "milestones_json", lock = FALSE)
+        if (!is.null(r)) r[["milestones_json"]] else NA_character_
+      }, error = function(e) NA_character_)
+    } else { NA_character_ }
     milestones_df <- parse_milestone_json_to_df(milestone_raw)
 
     can_edit <- !is.null(pg_con) && DBI::dbIsValid(pg_con) &&
@@ -2607,6 +3039,8 @@ server <- function(input, output, session) {
         site_row_id = site_row_id,
         col_map = cm,
         table_name = tbl_main,
+        milestone_table = ms_tbl_fetch,
+        milestone_row_id = ms_id_fetch,
         samples = sample_pairs,
         contributors = contrib_df,
         milestones = milestones_df,
@@ -2621,36 +3055,51 @@ server <- function(input, output, session) {
       task_edit_context(NULL)
     }
     
-    # 分母：计划周期 = 计划结束 - 计划开始（固定基准）
+    # ---- 与甘特图颜色逻辑保持完全一致 ----
+    # 分母：计划周期 = 计划结束 - 计划开始（固定基准，不随实际开始日期变化）
     planned_duration <- as.numeric(planned_end_date - raw_planned_start)
-    # 分子起点：实际开始有则用，否则退回计划开始
+    # 分子起点：实际开始有则用，否则退回计划开始（与 start_date = COALESCE(actual_start, planned_start) 一致）
     eff_start_detail <- if (!is.na(raw_actual_start)) raw_actual_start else raw_planned_start
-    # 理论计划进度 = 实际周期 / 计划周期
-    planned_p <- ifelse(
-      is_completed,
-      ifelse(planned_duration > 0,
-             as.numeric(actual_end_date - eff_start_detail) / planned_duration,
-             1.0),
-      ifelse(planned_duration > 0,
-             as.numeric(today - eff_start_detail) / planned_duration,
-             ifelse(!is.na(eff_start_detail) && today >= eff_start_detail, 1.0, 0.0))
-    )
-    
+    # 已制定计划起止但未填实际开始：与甘特「未开始」一致，不按日历推进理论进度
+    no_actual_but_plan <- !is_unplanned && is.na(raw_actual_start) && !is.na(raw_planned_start) &&
+      !is.na(raw_planned) && is.na(actual_end_date)
+    # 理论计划进度 = 实际周期 / 计划周期（无实际开始时理论进度按 0）
+    planned_p <- if (isTRUE(no_actual_but_plan)) {
+      0
+    } else {
+      ifelse(
+        is_completed,
+        ifelse(!is.na(planned_duration) && planned_duration > 0,
+               as.numeric(actual_end_date - eff_start_detail) / planned_duration,
+               1.0),
+        ifelse(!is.na(planned_duration) && planned_duration > 0,
+               as.numeric(today - eff_start_detail) / planned_duration,
+               ifelse(!is.na(eff_start_detail) && today >= eff_start_detail, 1.0, 0.0))
+      )
+    }
+
     # 计划/实际完成日期差异（仅在有 actual_end_date 时计算）
     delay_days <- if (!is.na(actual_end_date)) {
       as.numeric(actual_end_date - planned_end_date)
     } else {
       NA_real_
     }
-    
-    # 颜色用数值差额计算：实际完成度 - 理论计划进度
-    diff_p <- actual_progress - planned_p
-    
-    # --- 核心修复：弹窗诊断文案更新 ---
-    # 是否为“已报完成但未填写实际完成日期”
+
+    # 颜色用数值差额计算：实际完成度 - 理论计划进度（无实际开始时差值按 0，避免误报超前/落后）
+    diff_p <- if (isTRUE(no_actual_but_plan)) 0 else (actual_progress - planned_p)
+
+    # 特殊状态判定：与甘特图 is_not_started / missing_actual_done 逻辑一致
+    # is_not_started: 今天 < 有效开始日期 且 进度为0 且 未完成（与 Gantt bar 判定完全对齐）
+    is_not_started_detail <- !isTRUE(no_actual_but_plan) &&
+      !is.na(eff_start_detail) &&
+      isTRUE(today < eff_start_detail) &&
+      isTRUE(actual_progress == 0) &&
+      is.na(actual_end_date)
     missing_actual_done <- is.na(actual_end_date) && reported_progress >= 1.0
-    
-    diagnostic_text <- if (isTRUE(today < as.Date(task_info$start)) && isTRUE(actual_progress == 0)) {
+
+    diagnostic_text <- if (isTRUE(no_actual_but_plan)) {
+      span("⏳ 尚未开始：已制定计划起止，但未填写实际开始日期；理论计划进度按 0% 计，直至填写实际开始。", style = "color: #757575; font-weight: bold;")
+    } else if (is_not_started_detail) {
       span("⏳ 尚未开始：未到计划启动时间。", style = "color: #757575; font-weight: bold;")
     } else if (isTRUE(missing_actual_done)) {
       span("ℹ️ 已报完成，但未填写实际完成日期，请补充“实际完成时间”。", 
@@ -2738,8 +3187,13 @@ server <- function(input, output, session) {
       size = "l",
       easyClose = TRUE,
       footer = tagList(
-        if (isTRUE(auth$is_super_admin)) tags$span(style = "float: left;",
-          actionButton("btn_stage_maintain", "阶段维护", class = "btn-default", title = "管理 08 阶段定义与 09 阶段实例")
+        tags$span(style = "float: left;",
+          if (isTRUE(auth$can_manage_project) && !is.na(proj_row_id))
+            actionButton("btn_edit_personnel_center", "编辑人员、中心", class = "btn-warning",
+                         style = "margin-right: 6px;", title = "管理项目参与人员与临床中心"),
+          if (isTRUE(auth$is_super_admin))
+            actionButton("btn_stage_maintain", "阶段维护", class = "btn-default",
+                         title = "管理 08 阶段定义与 09 阶段实例")
         ),
         if (can_edit) tagList(
           actionButton("btn_edit_task", "修改/更新数据", class = "btn-primary"),
@@ -2781,13 +3235,20 @@ server <- function(input, output, session) {
                   tags$ul(
                     style = "white-space: normal; word-break: break-all; overflow-wrap: anywhere; padding-left: 20px;",
                      lapply(seq_len(nrow(remark_df)), function(i) {
-                       prefix_txt <- paste0(
-                        if (nzchar(remark_df$reporter[i])) paste0(remark_df$reporter[i], " - ") else "",
-                        if (nzchar(remark_df$type[i])) paste0("【", remark_df$type[i], "】") else ""
-                       )
                       tags$li(
-                        style = "white-space: normal; word-break: break-all; overflow-wrap: anywhere;",
-                        prefix_txt,
+                        style = "white-space: normal; word-break: break-all; overflow-wrap: anywhere; color: #333;",
+                        if (nzchar(remark_df$reporter[i])) paste0(remark_df$reporter[i], " - ") else NULL,
+                        if (nzchar(remark_df$type[i])) {
+                          typ <- as.character(remark_df$type[i])
+                          tagList(
+                            "\u3010",
+                            tags$span(
+                              style = paste0("color: ", remark_type_color(typ), "; font-weight: 600;"),
+                              typ
+                            ),
+                            "\u3011"
+                          )
+                        } else NULL,
                         if (nzchar(remark_df$updated_at[i])) " - " else "",
                         if (nzchar(remark_df$updated_at[i])) {
                           tags$span(
@@ -2831,11 +3292,19 @@ server <- function(input, output, session) {
                    tags$ul(
                      lapply(seq_len(nrow(contrib_df)), function(i) {
                        row <- contrib_df[i, ]
-                       txt <- paste0(
-                         row$person, "：", row$role, " - ", row$work,
-                         if (nzchar(row$amount)) paste0("（数量：", row$amount, "）") else ""
+                       note_txt <- if ("note" %in% names(row) && nzchar(as.character(row$note %||% ""))) paste0("【", row$note, "】") else ""
+                       role_txt <- trimws(as.character(row$role %||% ""))
+                       tags$li(
+                         style = "color: #333;",
+                         row$person, "：",
+                         tags$span(
+                           style = paste0("color: ", contrib_role_color(role_txt), "; font-weight: 600;"),
+                           if (nzchar(role_txt)) role_txt else "（空）"
+                         ),
+                         " - ", row$work,
+                         if (nzchar(as.character(row$amount %||% ""))) paste0("（数量：", row$amount, "）") else "",
+                         note_txt
                        )
-                       tags$li(txt)
                      })
                    )
                  } else {
@@ -2852,7 +3321,7 @@ server <- function(input, output, session) {
       } else {
         tagList(
       p(tags$b("理论计划进度："), tags$span(sprintf("%.1f%%", planned_p * 100), style="color:gray;"),
-        if(planned_p > 1.0) tags$span(" (已超过计划完成时间)", style="color:orange; font-size:0.9em;")),
+        if(!is.na(planned_p) && planned_p > 1.0) tags$span(" (已超过计划完成时间)", style="color:orange; font-size:0.9em;")),
       p(tags$b("实际提报进度："), tags$span(sprintf("%.1f%%", actual_progress * 100), style="font-weight:bold;")),
       p(tags$b("执行差值 (实际-计划)："), sprintf("%.1f%%", diff_p * 100)),
           p(tags$b("系统诊断结果："), diagnostic_text)
@@ -2860,6 +3329,520 @@ server <- function(input, output, session) {
       }
     ))
   })
+
+  observeEvent(input$project_header_clicked, {
+    ev <- input$project_header_clicked
+    req(is.list(ev), !is.null(ev$project_id))
+    display_pid <- as.character(ev$project_id)
+    req(nzchar(display_pid))
+    if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return(invisible(NULL))
+    auth <- current_user_auth()
+    if (isTRUE(auth$allow_none)) return(invisible(NULL))
+
+    proj_db <- resolve_project_db_id_from_display(pg_con, display_pid)
+    if (is.na(proj_db)) {
+      showNotification("未找到该项目，无法打开汇总。", type = "warning")
+      return(invisible(NULL))
+    }
+    if (!isTRUE(auth$allow_all) && nzchar(auth$allowed_subquery)) {
+      chk <- tryCatch(
+        DBI::dbGetQuery(pg_con, paste0(
+          'SELECT 1 AS ok FROM public."04项目总表" WHERE id = $1 AND id IN (', auth$allowed_subquery, ')'
+        ), params = list(as.integer(proj_db))),
+        error = function(e) data.frame(ok = integer(0))
+      )
+      if (nrow(chk) == 0L) {
+        showNotification("无权查看该项目汇总。", type = "warning")
+        return(invisible(NULL))
+      }
+    }
+
+    proj_row <- tryCatch(
+      DBI::dbGetQuery(pg_con,
+        'SELECT p."项目类型" AS project_type, COALESCE(NULLIF(p."项目名称", \'\'), \'项目-\' || p.id::text) AS display_name,
+                p."重要紧急程度" AS importance, mgr."姓名" AS manager_name
+         FROM public."04项目总表" p
+         LEFT JOIN public."05人员表" mgr ON mgr.id = p."05人员表_id"
+         WHERE p.id = $1',
+        params = list(as.integer(proj_db))
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(proj_row) || nrow(proj_row) == 0L) {
+      showNotification("加载项目信息失败。", type = "error")
+      return(invisible(NULL))
+    }
+
+    participants_display <- character(0)
+    manager_display <- "（无）"
+    tryCatch({
+      mgr <- DBI::dbGetQuery(pg_con,
+        'SELECT p."岗位", p."姓名" FROM public."05人员表" p INNER JOIN public."04项目总表" proj ON proj."05人员表_id" = p.id WHERE proj.id = $1',
+        params = list(as.integer(proj_db)))
+      if (nrow(mgr) > 0) {
+        pos <- if (is.na(mgr[["岗位"]][1]) || !nzchar(trimws(as.character(mgr[["岗位"]][1])))) "" else as.character(mgr[["岗位"]][1])
+        nm <- if (is.na(mgr[["姓名"]][1])) "" else as.character(mgr[["姓名"]][1])
+        manager_display <- if (nzchar(pos)) paste0(pos, "-", nm) else (if (nzchar(nm)) nm else "（无）")
+      }
+      parts <- DBI::dbGetQuery(pg_con,
+        'SELECT p."岗位", p."姓名" FROM public."05人员表" p INNER JOIN public."_nc_m2m_04项目总表_05人员表" m ON m."05人员表_id" = p.id WHERE m."04项目总表_id" = $1',
+        params = list(as.integer(proj_db)))
+      if (nrow(parts) > 0) {
+        pos_order <- c("工程师" = 1L, "CRA" = 2L, "统计师" = 3L, "实习生" = 4L)
+        ord <- vapply(seq_len(nrow(parts)), function(i) {
+          pos <- if (is.na(parts[["岗位"]][i]) || !nzchar(trimws(as.character(parts[["岗位"]][i])))) "" else trimws(as.character(parts[["岗位"]][i]))
+          if (pos %in% names(pos_order)) pos_order[[pos]] else 99L
+        }, integer(1))
+        parts <- parts[order(ord, parts[["姓名"]]), , drop = FALSE]
+        participants_display <- vapply(seq_len(nrow(parts)), function(i) {
+          pos <- if (is.na(parts[["岗位"]][i]) || !nzchar(trimws(as.character(parts[["岗位"]][i])))) "" else as.character(parts[["岗位"]][i])
+          nm <- if (is.na(parts[["姓名"]][i])) "" else as.character(parts[["姓名"]][i])
+          if (nzchar(pos)) paste0(pos, "-", nm) else (if (nzchar(nm)) nm else "")
+        }, character(1))
+        participants_display <- participants_display[nzchar(participants_display)]
+      }
+    }, error = function(e) { })
+
+    inst_sql_from <-
+      'FROM public."09项目阶段实例表" si
+         JOIN public."08项目阶段定义表" d ON d.id = si.stage_def_id
+         LEFT JOIN public."03医院_项目表" s ON s.id = si.site_project_id
+         LEFT JOIN public."01医院信息表" h ON h.id = s."01_hos_resource_table医院信息表_id"
+         WHERE si.project_id = $1'
+    inst_sql_select <-
+      'SELECT si.id AS stage_instance_id,
+                d.stage_key AS task_name, d.stage_order AS stage_ord,
+                CASE WHEN d.stage_scope = \'sync\'
+                     THEN \'所有中心（同步）\'
+                     ELSE COALESCE(NULLIF(h."医院名称", \'\'), \'中心-\' || COALESCE(s.id, 0)::text) END AS site_name,
+                si.remark_json::text AS remark_json,
+                si.contributors_json::text AS contributors_json,
+                COALESCE(si.progress, 0)::numeric AS progress_pct,
+                si.planned_start_date AS planned_start_date,
+                si.planned_end_date AS planned_end_date,
+                si.actual_start_date AS actual_start_date,
+                si.actual_end_date AS actual_end_date,
+                COALESCE(si.is_active, TRUE) AS si_is_active'
+    inst <- tryCatch(
+      DBI::dbGetQuery(pg_con,
+        paste0(inst_sql_select, ' ', inst_sql_from, ' ORDER BY d.stage_order, site_name'),
+        params = list(as.integer(proj_db))
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(inst)) {
+      showNotification("加载阶段实例失败。", type = "error")
+      return(invisible(NULL))
+    }
+    # 与甘特视图一致：仅 COALESCE(si.is_active, TRUE)=TRUE 的 09 行参与贡献者与「按阶段」罗列（在库内过滤，避免 R 端布尔类型歧义）
+    inst_act <- tryCatch(
+      DBI::dbGetQuery(pg_con,
+        paste0(inst_sql_select, ' ', inst_sql_from, ' AND COALESCE(si.is_active, TRUE) = TRUE ORDER BY d.stage_order, site_name'),
+        params = list(as.integer(proj_db))
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(inst_act)) {
+      inst_act <- inst[0L, , drop = FALSE]
+    }
+    if (nrow(inst) > 0L) {
+      inst$planned_start_date <- as.Date(inst$planned_start_date)
+      inst$planned_end_date <- as.Date(inst$planned_end_date)
+      inst$actual_start_date <- as.Date(inst$actual_start_date)
+      inst$actual_end_date <- as.Date(inst$actual_end_date)
+    }
+    if (nrow(inst_act) > 0L) {
+      inst_act$planned_start_date <- as.Date(inst_act$planned_start_date)
+      inst_act$planned_end_date <- as.Date(inst_act$planned_end_date)
+      inst_act$actual_start_date <- as.Date(inst_act$actual_start_date)
+      inst_act$actual_end_date <- as.Date(inst_act$actual_end_date)
+    }
+
+    # 项目汇总「各中心进度」：有实际结束则固定 100%；否则仅在有完整计划且已填实际开始时采用库内进度，否则 0%
+    effective_center_progress_pct_for_summary <- function(ps, pe, asd, aed, raw_pct) {
+      if (length(aed) == 1L && !is.na(aed)) return(100)
+      rp <- suppressWarnings(as.numeric(raw_pct))
+      if (length(rp) != 1L || is.na(rp)) rp <- 0
+      if (rp <= 1 && rp >= 0) rp <- rp * 100
+      if (is.na(ps) || is.na(pe)) return(0)
+      if (is.na(asd)) return(0)
+      max(0, min(100, round(rp)))
+    }
+
+    fmt_amt <- function(x) {
+      x <- as.numeric(x)
+      if (length(x) != 1L || is.na(x)) return("1")
+      if (abs(x - round(x)) < 1e-9) as.character(as.integer(round(x))) else format(round(x, 2), trim = TRUE)
+    }
+
+    remark_rows <- list()
+    contrib_all <- list()
+    if (nrow(inst) > 0L) {
+      for (ri in seq_len(nrow(inst))) {
+        tk <- as.character(inst$task_name[ri])
+        sn <- as.character(inst$site_name[ri])
+        rj <- inst$remark_json[ri]
+        if (is.na(rj)) rj <- ""
+        rdf <- parse_remark_json_to_df(rj)
+        if (nrow(rdf) > 0L) {
+          for (j in seq_len(nrow(rdf))) {
+            remark_rows[[length(remark_rows) + 1L]] <- data.frame(
+              type = trimws(as.character(rdf$type[j] %||% "")),
+              updated_at = as.character(rdf$updated_at[j] %||% ""),
+              reporter = trimws(as.character(rdf$reporter[j] %||% "")),
+              content = as.character(rdf$content[j] %||% ""),
+              stage_label = stage_label_for_key(tk),
+              site_name = sn,
+              stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+    }
+    if (nrow(inst_act) > 0L) {
+      for (ri in seq_len(nrow(inst_act))) {
+        tk <- as.character(inst_act$task_name[ri])
+        sn <- as.character(inst_act$site_name[ri])
+        cj <- inst_act$contributors_json[ri]
+        if (is.na(cj)) cj <- ""
+        cdf <- parse_contrib_json_to_df(cj)
+        if (nrow(cdf) > 0L) {
+          for (j in seq_len(nrow(cdf))) {
+            contrib_all[[length(contrib_all) + 1L]] <- data.frame(
+              person = trimws(as.character(cdf$person[j] %||% "")),
+              role = trimws(as.character(cdf$role[j] %||% "")),
+              work = trimws(as.character(cdf$work[j] %||% "")),
+              amount = as.character(cdf$amount[j] %||% ""),
+              task_name = tk,
+              site_name = sn,
+              progress_pct = effective_center_progress_pct_for_summary(
+                inst_act$planned_start_date[ri],
+                inst_act$planned_end_date[ri],
+                inst_act$actual_start_date[ri],
+                inst_act$actual_end_date[ri],
+                inst_act$progress_pct[ri]
+              ),
+              stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+    }
+
+    remark_df <- if (length(remark_rows) > 0L) bind_rows(remark_rows) else empty_remark_df()
+    if (nrow(remark_df) > 0L) {
+      remark_df$sort_date <- vapply(remark_df$updated_at, function(u) {
+        d <- parse_update_date_for_display(u)
+        if (is.na(d)) as.Date("1970-01-01") else d
+      }, as.Date(1))
+      remark_df$typ_norm <- trimws(as.character(remark_df$type %||% ""))
+      remark_df$typ_norm[!nzchar(remark_df$typ_norm)] <- NA_character_
+      remark_df$type_display <- ifelse(is.na(remark_df$typ_norm), "（无类型）", remark_df$typ_norm)
+      std_types <- c("卡点", "问题", "经验分享")
+      all_disp <- unique(remark_df$type_display)
+      custom_sorted <- sort(setdiff(all_disp, c(std_types, "（无类型）")))
+      type_rank_map <- list()
+      type_rank_map[["卡点"]] <- 1L
+      type_rank_map[["问题"]] <- 2L
+      type_rank_map[["经验分享"]] <- 3L
+      rk <- 4L
+      for (nm in custom_sorted) {
+        type_rank_map[[nm]] <- rk
+        rk <- rk + 1L
+      }
+      type_rank_map[["（无类型）"]] <- 99999L
+      remark_df$type_rank <- vapply(remark_df$type_display, function(x) {
+        v <- type_rank_map[[x]]
+        if (is.null(v)) 5000L else as.integer(v)
+      }, integer(1))
+      remark_df <- remark_df %>%
+        arrange(.data$type_rank, desc(.data$sort_date), desc(.data$reporter))
+    }
+
+    contrib_df <- if (length(contrib_all) > 0L) {
+      bind_rows(contrib_all)
+    } else {
+      data.frame(
+        person = character(0), role = character(0), work = character(0), amount = character(0),
+        task_name = character(0), site_name = character(0), progress_pct = numeric(0),
+        stringsAsFactors = FALSE
+      )
+    }
+
+    importance_level <- as.character(proj_row$importance[1] %||% "")
+    importance_display <- if (is.na(importance_level) || !nzchar(trimws(importance_level))) "（未设置）" else trimws(importance_level)
+    importance_color <- switch(
+      trimws(importance_level),
+      "重要紧急" = "#C62828",
+      "重要不紧急" = "#F57C00",
+      "紧急不重要" = "#1976D2",
+      "不重要不紧急" = "#616161",
+      "#757575"
+    )
+
+    ui_remarks <- if (nrow(remark_df) == 0L) {
+      tags$span("（暂无）", style = "color:#999;")
+    } else {
+      type_order_vec <- remark_df %>%
+        distinct(.data$type_display, .data$type_rank) %>%
+        arrange(.data$type_rank) %>%
+        pull(.data$type_display)
+      tagList(lapply(type_order_vec, function(td) {
+        sub <- remark_df %>% filter(.data$type_display == td)
+        hdr_col <- if (identical(td, "（无类型）")) "#616161" else remark_type_color(td)
+        tags$div(
+          style = "margin-bottom: 18px;",
+          tags$div(
+            style = paste0(
+              "font-weight: 700; font-size: 14px; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; color: ",
+              hdr_col, ";"
+            ),
+            td
+          ),
+          tags$ol(
+            style = "padding-left: 22px; margin-top: 4px;",
+            lapply(seq_len(nrow(sub)), function(i) {
+              tags$li(
+                style = "margin-bottom: 8px; white-space: normal; word-break: break-word;",
+                tags$span(style = "color:#555;", sprintf("[%s · %s] ", sub$stage_label[i], sub$site_name[i])),
+                if (nzchar(sub$type[i])) {
+                  typ <- as.character(sub$type[i])
+                  tagList(
+                    "\u3010",
+                    tags$span(
+                      style = paste0("color: ", remark_type_color(typ), "; font-weight: 600;"),
+                      typ
+                    ),
+                    "\u3011"
+                  )
+                } else NULL,
+                if (nzchar(sub$updated_at[i])) tags$span(style = remark_date_style(sub$updated_at[i]), paste0(sub$updated_at[i], " ")) else NULL,
+                if (nzchar(sub$reporter[i])) paste0(sub$reporter[i], "：") else NULL,
+                sub$content[i]
+              )
+            })
+          )
+        )
+      }))
+    }
+
+    merge_contrib_totals <- function(df) {
+      if (is.null(df) || nrow(df) == 0L) return(df)
+      df$amt_num <- vapply(seq_len(nrow(df)), function(i) parse_contrib_amount_num(df$amount[i]), numeric(1))
+      df %>%
+        group_by(person, role, work) %>%
+        summarise(total_amt = sum(amt_num, na.rm = TRUE), .groups = "drop") %>%
+        mutate(ro = contrib_role_sort_key(role)) %>%
+        arrange(person, ro, work) %>%
+        select(-ro)
+    }
+
+    ui_contrib_by_person <- local({
+      if (nrow(contrib_df) == 0L) {
+        return(tags$span("（暂无进度贡献者记录）", style = "color:#999;"))
+      }
+      m <- merge_contrib_totals(contrib_df %>% select(person, role, work, amount))
+      persons <- sort(unique(m$person))
+      tags$div(
+        style = "display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 16px; row-gap: 4px; align-items: start;",
+        lapply(persons, function(pn) {
+          sub <- m %>% filter(person == pn)
+          tags$div(
+            style = "min-width: 0;",
+            tagList(
+              tags$div(style = "font-weight: 700; margin-top: 10px; color: #1a237e;", pn),
+              tagList(lapply(seq_len(nrow(sub)), function(i) {
+                contrib_summary_line_tag(
+                  sub$role[i], sub$work[i], fmt_amt(sub$total_amt[i]),
+                  font_size = "14px"
+                )
+              }))
+            )
+          )
+        })
+      )
+    })
+
+    ui_contrib_by_stage <- local({
+      if (nrow(inst_act) == 0L) {
+        return(tags$span("（无已激活阶段，或暂无阶段数据）", style = "color:#999;"))
+      }
+      st_ord <- inst_act %>% distinct(task_name, stage_ord) %>% arrange(stage_ord)
+      tags$div(
+        style = "display: flex; flex-direction: row; flex-wrap: nowrap; gap: 12px; align-items: flex-start; overflow-x: auto; padding-bottom: 6px; -webkit-overflow-scrolling: touch;",
+        lapply(seq_len(nrow(st_ord)), function(si) {
+          tk <- as.character(st_ord$task_name[si])
+          sub_inst <- inst_act %>% filter(.data$task_name == tk)
+          if (nrow(sub_inst) > 0L) {
+            sub_inst$display_progress_pct <- vapply(seq_len(nrow(sub_inst)), function(ii) {
+              effective_center_progress_pct_for_summary(
+                sub_inst$planned_start_date[ii],
+                sub_inst$planned_end_date[ii],
+                sub_inst$actual_start_date[ii],
+                sub_inst$actual_end_date[ii],
+                sub_inst$progress_pct[ii]
+              )
+            }, numeric(1))
+          }
+          prog_lines <- if (nrow(sub_inst) == 0L) {
+            character(0)
+          } else {
+            sub_inst %>%
+              group_by(site_name) %>%
+              summarise(display_progress_pct = max(display_progress_pct), .groups = "drop") %>%
+              arrange(site_name) %>%
+              mutate(s = sprintf("%s：%.0f%%", site_name, display_progress_pct)) %>%
+              pull(s)
+          }
+          prog_block <- if (length(prog_lines) == 0L) {
+            "各中心进度：\n（无）"
+          } else {
+            paste(c("各中心进度：", paste0(prog_lines, "；")), collapse = "\n")
+          }
+          cdf_s <- contrib_df %>% filter(.data$task_name == tk)
+          body <- if (nrow(cdf_s) == 0L) {
+            tags$span("（本阶段无贡献者记录）", style = "color:#888; font-size:13px;")
+          } else {
+            m <- merge_contrib_totals(cdf_s %>% select(person, role, work, amount))
+            persons <- sort(unique(m$person))
+            tagList(lapply(persons, function(pn) {
+              sub <- m %>% filter(person == pn)
+              tagList(
+                tags$div(style = "font-weight: 600; margin-top: 6px; color: #333;", pn),
+                tagList(lapply(seq_len(nrow(sub)), function(i) {
+                  contrib_summary_line_tag(
+                    sub$role[i], sub$work[i], fmt_amt(sub$total_amt[i]),
+                    font_size = "13px"
+                  )
+                }))
+              )
+            }))
+          }
+          tags$div(
+            style = "flex: 0 0 auto; min-width: 220px; max-width: 300px; padding: 10px; background: #fafafa; border-radius: 6px; border: 1px solid #e0e0e0;",
+            tags$div(
+              style = "font-weight: 800; color: #263238; margin-bottom: 4px;",
+              stage_label_for_key(tk)
+            ),
+            tags$div(
+              style = "font-size: 13px; color: #546e7a; margin-bottom: 8px; white-space: pre-line; word-break: break-word;",
+              prog_block
+            ),
+            body
+          )
+        })
+      )
+    })
+
+    showModal(modalDialog(
+      title = sprintf("项目汇总 — %s", as.character(proj_row$display_name[1])),
+      size = "l",
+      easyClose = TRUE,
+      footer = modalButton("关闭"),
+      tags$div(
+        style = "max-height: 72vh;",
+        tabsetPanel(
+          id = "project_summary_tabs",
+          type = "tabs",
+          tabPanel(
+            title = "基础信息",
+            tags$div(
+              class = "well",
+              style = "margin-top: 12px; margin-bottom: 0; padding: 16px 18px; border-radius: 8px; background: #fafafa; border: 1px solid #e8e8e8;",
+              fluidRow(
+                column(6,
+                  p(tags$b("项目类型："), as.character(proj_row$project_type[1] %||% "（空）")),
+                  p(tags$b("项目名称："), as.character(proj_row$display_name[1])),
+                  p(tags$b("项目负责人："), manager_display)
+                ),
+                column(6,
+                  p(tags$b("重要紧急程度："),
+                    tags$span(importance_display, style = sprintf("color: %s; font-weight: bold;", importance_color))),
+                  p(tags$b("参与人员："),
+                    if (length(participants_display) > 0)
+                      tags$div(style = "white-space: pre-wrap; margin-top: 4px;", paste(participants_display, collapse = "\n"))
+                    else
+                      tags$span("（无）", style = "color: #999;"))
+                )
+              )
+            )
+          ),
+          tabPanel(
+            title = "问题与反馈",
+            tags$div(
+              class = "well",
+              style = "margin-top: 12px; margin-bottom: 0; padding: 16px 18px; border-radius: 8px; background: #fafafa; border: 1px solid #e8e8e8; max-height: 58vh; overflow-y: auto;",
+              tags$p(tags$small("全中心、全阶段汇总；按类型分块展示。类型顺序：卡点 → 问题 → 经验分享 → 其余类型（字母序）→ 无类型；类型内按反馈日期、反馈人降序；序号仅在各类型内连续。", style = "color:#666; margin-bottom: 10px; display: block;")),
+              ui_remarks
+            )
+          ),
+          tabPanel(
+            title = "贡献者",
+            tags$div(
+              style = "margin-top: 8px;",
+              tags$div(
+                class = "well",
+                style = "margin-bottom: 0; padding: 16px 18px; border-radius: 8px; background: #fafafa; border: 1px solid #e8e8e8; max-height: 54vh; overflow-y: auto;",
+                tags$div(
+                  style = "display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px;",
+                  tags$div(
+                    style = "flex: 1; min-width: 0;",
+                    tags$div(
+                      id = "proj_summary_contrib_hint_person",
+                      tags$p(
+                        tags$small("仅汇总 is_active 的 09 阶段实例中的贡献；相同参与度与工作内容已合并数量。", style = "color:#666; margin-bottom: 0; display: block;")
+                      )
+                    ),
+                    tags$div(
+                      id = "proj_summary_contrib_hint_stage",
+                      style = "display: none;",
+                      tags$p(
+                        tags$small("仅含 is_active 的 09 阶段实例。各中心进度：有实际结束则 100%；否则须有计划起止且已填实际开始才用库内进度，否则 0%。从左到右与甘特顺序一致。参与度：主导（红）、参与（蓝）、协助（绿）。", style = "color:#666; margin-bottom: 0; display: block;")
+                      )
+                    )
+                  ),
+                  tags$button(
+                    type = "button",
+                    id = "proj_summary_contrib_toggle_btn",
+                    class = "btn btn-default",
+                    style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
+                    "按阶段"
+                  )
+                ),
+                tags$div(id = "proj_summary_view_person", ui_contrib_by_person),
+                tags$div(id = "proj_summary_view_stage", style = "display: none;", ui_contrib_by_stage)
+              ),
+              tags$script(HTML('
+                setTimeout(function() {
+                  var btn = $("#proj_summary_contrib_toggle_btn");
+                  if (!btn.length) return;
+                  var hintP = $("#proj_summary_contrib_hint_person");
+                  var hintS = $("#proj_summary_contrib_hint_stage");
+                  function showPerson() {
+                    $("#proj_summary_view_person").show();
+                    $("#proj_summary_view_stage").hide();
+                    hintP.show();
+                    hintS.hide();
+                    btn.text("按阶段");
+                  }
+                  function showStage() {
+                    $("#proj_summary_view_person").hide();
+                    $("#proj_summary_view_stage").show();
+                    hintP.hide();
+                    hintS.show();
+                    btn.text("按人员");
+                  }
+                  btn.off("click.projSummaryContrib").on("click.projSummaryContrib", function() {
+                    if ($("#proj_summary_view_person").is(":visible")) showStage(); else showPerson();
+                  });
+                }, 0);
+              '))
+            )
+          )
+        )
+      )
+    ))
+  }, ignoreNULL = TRUE)
   
   open_task_edit_modal <- function(ctx) {
     req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
@@ -2869,27 +3852,107 @@ server <- function(input, output, session) {
     pd <- ctx$planned_end_date
     ad <- ctx$actual_end_date
     proj_type <- ctx$project_type
-    stages_for_proj <- stage_keys_for_project_type(proj_type)
-    cur_idx <- which(stages_for_proj == ctx$task_name)[1]
-    prev_name <- prev_plan <- prev_act <- "（无）"
-    if (!is.na(cur_idx) && cur_idx > 1L) {
-      prev_stage <- stages_for_proj[cur_idx - 1L]
-      prev_name <- stage_label_for_key(prev_stage)
-      gd <- current_gantt_data()
-      if (!is.null(gd) && nrow(gd) > 0) {
-        prev_row <- if (ctx$is_sync) {
-          gd %>% filter(project_id == ctx$project_id, task_name == prev_stage) %>% slice(1)
-        } else {
-          gd %>% filter(project_id == ctx$project_id, site_name == ctx$site_name, task_name == prev_stage) %>% slice(1)
-        }
-        if (nrow(prev_row) > 0) {
-          pp <- if ("raw_planned_end_date" %in% names(prev_row)) prev_row$raw_planned_end_date[1] else prev_row$planned_end_date[1]
-          pa <- prev_row$actual_end_date[1]
-          prev_plan <- if (length(pp) > 0 && !is.na(pp)) format(pp, "%Y-%m-%d") else "（无）"
-          prev_act <- if (length(pa) > 0 && !is.na(pa)) format(pa, "%Y-%m-%d") else "（无）"
+    # ---- 上阶段信息（参考）----
+    prev_name <- "（无）"
+    prev_ps <- prev_as <- prev_pe <- prev_ae <- prev_prog <- "（无）"
+    prev_site_hint <- NULL  # 若上一阶段为子中心阶段且选取了某特定中心，记录中心名用于提示
+    tryCatch({
+      gd_for_prev <- current_gantt_data()
+      if (!is.null(gd_for_prev) && nrow(gd_for_prev) > 0) {
+        ss_local <- sync_stages_current()
+        # 取本项目全部已激活阶段行（同步+子中心混合；同步阶段已按中心展开）
+        gd_proj <- gd_for_prev %>% filter(project_id == ctx$project_id)
+        if (nrow(gd_proj) > 0) {
+          # 以 08 表 stage_order 为序，获取去重后的活跃阶段键列表（同步与子中心混排）
+          stage_order_map <- stage_catalog()$defs %>%
+            { if (!is.na(proj_type) && nzchar(proj_type)) filter(., project_type == proj_type) else . } %>%
+            select(stage_key, stage_order) %>%
+            distinct(stage_key, .keep_all = TRUE)
+          active_keys <- gd_proj %>%
+            distinct(task_name) %>%
+            left_join(stage_order_map, by = c("task_name" = "stage_key")) %>%
+            arrange(coalesce(stage_order, 999999L)) %>%
+            pull(task_name)
+          cur_idx <- which(active_keys == ctx$task_name)[1]
+          if (!is.na(cur_idx) && cur_idx > 1L) {
+            prev_key  <- active_keys[cur_idx - 1L]
+            prev_name <- stage_label_for_key(prev_key)
+            prev_is_sync <- prev_key %in% ss_local
+            prev_rows <- gd_proj %>% filter(task_name == prev_key)
+            if (nrow(prev_rows) > 0) {
+              cur_is_sync  <- isTRUE(ctx$is_sync)
+              same_scope   <- (cur_is_sync == prev_is_sync)
+              # 选取代表行 -------------------------------------------------------
+              # ① 上一阶段是同步阶段：各行数据相同（展开副本），直接取首行
+              # ② 上下阶段 scope 相同（都是子中心阶段）：直接取本中心自己的行，无需跨中心比较
+              # ③ 上下阶段 scope 不同（当前为同步，上一阶段为子中心）：跨中心选出最慢进度的代表行
+              chosen <- if (prev_is_sync || nrow(prev_rows) == 1L) {
+                prev_rows[1L, ]
+              } else if (same_scope) {
+                # 同 scope：只看本中心
+                same_site <- prev_rows %>% filter(site_name == ctx$site_name)
+                if (nrow(same_site) > 0) same_site[1L, ] else prev_rows[1L, ]
+              } else {
+                # 跨 scope（当前同步 → 上一子中心）：按四级优先级选代表中心
+                # 优先级：① 未完成+有计划 → ② 已完成+有计划 → ③ 未完成+无计划 → ④ 已完成+无计划
+                # "有计划" = raw_planned_start_date 与 raw_planned_end_date 均非 NA
+                ps_col_name <- if ("raw_planned_start_date" %in% names(prev_rows)) "raw_planned_start_date" else "planned_start_date"
+                pe_col_name <- if ("raw_planned_end_date"   %in% names(prev_rows)) "raw_planned_end_date"   else "planned_end_date"
+                hp <- !is.na(suppressWarnings(as.Date(prev_rows[[ps_col_name]]))) &
+                      !is.na(suppressWarnings(as.Date(prev_rows[[pe_col_name]])))
+                dn <- !is.na(prev_rows$actual_end_date)
+                pool_1 <- prev_rows[!dn &  hp, ]   # 未完成+有计划
+                pool_2 <- prev_rows[ dn &  hp, ]   # 已完成+有计划
+                pool_3 <- prev_rows[!dn & !hp, ]   # 未完成+无计划
+                pool_4 <- prev_rows[ dn & !hp, ]   # 已完成+无计划（兜底）
+                # 选第一个非空池
+                if (nrow(pool_1) > 0) {
+                  # 未完成+有计划：取进度最慢；并列取计划结束最晚
+                  prog_v <- suppressWarnings(as.numeric(pool_1$progress))
+                  min_p  <- if (any(!is.na(prog_v))) min(prog_v, na.rm = TRUE) else 0
+                  cands  <- pool_1[is.na(prog_v) | (!is.na(prog_v) & prog_v <= min_p + 1e-9), ]
+                  pe_v   <- suppressWarnings(as.Date(cands[[pe_col_name]]))
+                  cands[order(-as.numeric(pe_v), na.last = TRUE)[1L], ]
+                } else if (nrow(pool_2) > 0) {
+                  # 已完成+有计划：取实际结束最晚
+                  ae_v <- suppressWarnings(as.Date(pool_2$actual_end_date))
+                  pool_2[order(-as.numeric(ae_v), na.last = TRUE)[1L], ]
+                } else if (nrow(pool_3) > 0) {
+                  # 未完成+无计划：取进度最慢（通常都是 0，再按计划结束排）
+                  prog_v <- suppressWarnings(as.numeric(pool_3$progress))
+                  min_p  <- if (any(!is.na(prog_v))) min(prog_v, na.rm = TRUE) else 0
+                  cands  <- pool_3[is.na(prog_v) | (!is.na(prog_v) & prog_v <= min_p + 1e-9), ]
+                  pe_v   <- suppressWarnings(as.Date(cands[[pe_col_name]]))
+                  cands[order(-as.numeric(pe_v), na.last = TRUE)[1L], ]
+                } else {
+                  # 已完成+无计划：取实际结束最晚
+                  ae_v <- suppressWarnings(as.Date(pool_4$actual_end_date))
+                  pool_4[order(-as.numeric(ae_v), na.last = TRUE)[1L], ]
+                }
+              }
+              # 跨 scope 且多中心时，记录显示的是哪个中心
+              if (!prev_is_sync && !same_scope && nrow(prev_rows) > 1L && "site_name" %in% names(chosen)) {
+                prev_site_hint <- as.character(chosen$site_name[1L])
+              }
+              # 提取四个日期与进度（全部容错）-------------------------------------
+              safe_date <- function(x) tryCatch({
+                d <- suppressWarnings(as.Date(x[1L]))
+                if (length(d) == 0L || is.na(d)) "（无）" else format(d, "%Y-%m-%d")
+              }, error = function(e) "（无）")
+              prev_ps   <- safe_date(if ("raw_planned_start_date" %in% names(chosen)) chosen$raw_planned_start_date else chosen$planned_start_date)
+              prev_as   <- safe_date(if ("raw_actual_start_date"  %in% names(chosen)) chosen$raw_actual_start_date  else chosen$actual_start_date)
+              prev_pe   <- safe_date(if ("raw_planned_end_date"   %in% names(chosen)) chosen$raw_planned_end_date   else chosen$planned_end_date)
+              prev_ae   <- safe_date(chosen$actual_end_date)
+              prev_prog <- tryCatch({
+                is_done_prev <- !is.na(chosen$actual_end_date[1L])
+                p <- suppressWarnings(as.numeric(chosen$progress[1L]))
+                if (is_done_prev) "100%" else if (is.na(p)) "（无）" else paste0(round(p * 100, 0L), "%")
+              }, error = function(e) "（无）")
+            }
+          }
         }
       }
-    }
+    }, error = function(e) NULL)  # 整体兜底：任何异常保持默认"（无）"
     edit_title <- sprintf(
       "%s-%s-%s-修改/更新数据",
       if (!is.na(ctx$project_type) && nzchar(ctx$project_type)) as.character(ctx$project_type) else "未知",
@@ -2915,9 +3978,13 @@ server <- function(input, output, session) {
         column(6,
           tags$div(style = "background:#f5f5f5; padding:10px; border-radius:4px; margin-bottom:15px;",
             tags$b("上阶段信息（参考）"),
-            p(tags$b("上阶段名称："), prev_name),
-            p(tags$b("计划结束时间："), prev_plan),
-            p(tags$b("实际结束日期："), prev_act)
+            p(tags$b("阶段："), prev_name,
+              if (!is.null(prev_site_hint)) tags$span(style = "color:#888; font-size:12px;", paste0("（", prev_site_hint, "）")) else NULL),
+            p(tags$b("计划开始："), prev_ps),
+            p(tags$b("实际开始："), prev_as),
+            p(tags$b("计划结束："), prev_pe),
+            p(tags$b("实际结束："), prev_ae),
+            p(tags$b("当前进度："), prev_prog)
           ),
           p(tags$span(stage_label_for_key(ctx$task_name), style = "color: #1976D2; font-weight: bold;")),
           textInput("edit_planned_start_date", "计划开始日期：", value = if (length(psd) > 0 && !is.na(psd)) format(psd, "%Y-%m-%d") else "", placeholder = "YYYY-MM-DD，留空表示未制定计划"),
@@ -2997,6 +4064,33 @@ server <- function(input, output, session) {
         id = "stage_maintain_tabs",
         tabPanel("08 阶段定义", value = "tab1", uiOutput("stage_maintain_tab1_ui")),
         tabPanel("09 阶段实例", value = "tab2", uiOutput("stage_maintain_tab2_ui"))
+      )
+    ))
+  })
+
+  # ---------- 编辑人员、中心：打开弹窗 ----------
+  observeEvent(input$btn_edit_personnel_center, {
+    auth <- current_user_auth()
+    if (!isTRUE(auth$can_manage_project)) return()
+    ctx <- task_edit_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    proj_id <- ctx$proj_row_id
+    req(!is.na(proj_id))
+    personnel_center_context(list(
+      proj_row_id = as.integer(proj_id),
+      project_id  = ctx$project_id
+    ))
+    pc_center_refresh(0L)
+    showModal(modalDialog(
+      title = sprintf("编辑人员、中心 — %s", ctx$project_id),
+      size = "l",
+      easyClose = TRUE,
+      footer = modalButton("关闭"),
+      tabsetPanel(
+        id = "pc_tabs",
+        tabPanel("参与人员管理", value = "tab_personnel", uiOutput("pc_personnel_ui")),
+        tabPanel("临床中心管理", value = "tab_center",    uiOutput("pc_center_ui")),
+        tabPanel("修改项目名称", value = "tab_proj_name", uiOutput("pc_proj_name_ui"))
       )
     ))
   })
@@ -3243,6 +4337,298 @@ server <- function(input, output, session) {
     }, error = function(e) showNotification(paste0("保存失败：", conditionMessage(e)), type = "error"))
   })
 
+  # ==================== 编辑人员、中心 功能 ====================
+
+  # ---------- Tab1: 参与人员管理 ----------
+  output$pc_personnel_ui <- renderUI({
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    proj_id <- ctx$proj_row_id
+    tryCatch({
+      all_staff <- DBI::dbGetQuery(pg_con,
+        'SELECT id, "姓名", "岗位" FROM public."05人员表" WHERE "人员状态" = \'在职\' ORDER BY "岗位", "姓名"')
+      staff_choices <- setNames(
+        as.character(all_staff$id),
+        vapply(seq_len(nrow(all_staff)), function(i) {
+          pos <- trimws(as.character(if (is.na(all_staff[["岗位"]][i])) "" else all_staff[["岗位"]][i]))
+          nm  <- as.character(if (is.na(all_staff[["姓名"]][i])) "" else all_staff[["姓名"]][i])
+          if (nzchar(pos)) paste0(pos, "-", nm) else nm
+        }, character(1))
+      )
+      mgr_row <- DBI::dbGetQuery(pg_con,
+        'SELECT "05人员表_id" FROM public."04项目总表" WHERE id = $1',
+        params = list(as.integer(proj_id)))
+      cur_mgr_id <- if (nrow(mgr_row) > 0 && !is.na(mgr_row[["05人员表_id"]][1]))
+                      as.character(mgr_row[["05人员表_id"]][1]) else ""
+      parts_row <- DBI::dbGetQuery(pg_con,
+        'SELECT "05人员表_id" FROM public."_nc_m2m_04项目总表_05人员表" WHERE "04项目总表_id" = $1',
+        params = list(as.integer(proj_id)))
+      cur_part_ids <- if (nrow(parts_row) > 0) as.character(parts_row[["05人员表_id"]]) else character(0)
+      tagList(
+        tags$p(style = "color:#666; font-size:13px; margin-bottom:12px;",
+               "修改后点击「保存人员设置」使更改生效。只能在在职人员中选择。"),
+        fluidRow(
+          column(6,
+            selectInput("pc_manager_id", "项目负责人",
+              choices = c("（无）" = "", staff_choices),
+              selected = cur_mgr_id, width = "100%")
+          ),
+          column(6,
+            selectizeInput("pc_participant_ids", "参与人员（可多选）",
+              choices = staff_choices,
+              selected = cur_part_ids,
+              multiple = TRUE,
+              options = list(placeholder = "请选择参与人员..."),
+              width = "100%")
+          )
+        ),
+        actionButton("btn_save_personnel", "保存人员设置", class = "btn-primary")
+      )
+    }, error = function(e) tags$p(style = "color:red;", paste0("加载失败：", conditionMessage(e))))
+  })
+
+  observeEvent(input$btn_save_personnel, {
+    auth <- current_user_auth()
+    if (!isTRUE(auth$can_manage_project)) return()
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    proj_id <- as.integer(ctx$proj_row_id)
+    new_mgr_str  <- input$pc_manager_id
+    new_part_ids <- input$pc_participant_ids
+    tryCatch({
+      new_mgr_int <- if (!is.null(new_mgr_str) && nzchar(trimws(new_mgr_str)))
+                       suppressWarnings(as.integer(new_mgr_str)) else NA_integer_
+      old_mgr_row <- DBI::dbGetQuery(pg_con,
+        'SELECT "05人员表_id" FROM public."04项目总表" WHERE id = $1',
+        params = list(proj_id))
+      old_mgr_id <- if (nrow(old_mgr_row) > 0) old_mgr_row[["05人员表_id"]][1] else NA_integer_
+      if (is.na(new_mgr_int)) {
+        DBI::dbExecute(pg_con,
+          'UPDATE public."04项目总表" SET "05人员表_id" = NULL WHERE id = $1',
+          params = list(proj_id))
+      } else {
+        DBI::dbExecute(pg_con,
+          'UPDATE public."04项目总表" SET "05人员表_id" = $1 WHERE id = $2',
+          params = list(new_mgr_int, proj_id))
+      }
+      old_parts <- DBI::dbGetQuery(pg_con,
+        'SELECT "05人员表_id" FROM public."_nc_m2m_04项目总表_05人员表" WHERE "04项目总表_id" = $1',
+        params = list(proj_id))
+      old_part_ids <- if (nrow(old_parts) > 0) as.integer(old_parts[["05人员表_id"]]) else integer(0)
+      new_part_ints <- if (!is.null(new_part_ids) && length(new_part_ids) > 0)
+        suppressWarnings(as.integer(new_part_ids[nzchar(new_part_ids)])) else integer(0)
+      to_add    <- setdiff(new_part_ints, old_part_ids)
+      to_remove <- setdiff(old_part_ids, new_part_ints)
+      for (rid in to_remove) {
+        DBI::dbExecute(pg_con,
+          'DELETE FROM public."_nc_m2m_04项目总表_05人员表" WHERE "04项目总表_id" = $1 AND "05人员表_id" = $2',
+          params = list(proj_id, as.integer(rid)))
+      }
+      for (aid in to_add) {
+        DBI::dbExecute(pg_con,
+          'INSERT INTO public."_nc_m2m_04项目总表_05人员表" ("04项目总表_id", "05人员表_id") VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          params = list(proj_id, as.integer(aid)))
+      }
+      insert_audit_log(
+        pg_con, auth$work_id, auth$name,
+        "UPDATE", "04项目总表+_nc_m2m_04项目总表_05人员表", proj_id,
+        sprintf("修改项目 %s 的人员配置", ctx$project_id),
+        sprintf("负责人: %s -> %s; 参与人员 +%d -%d", old_mgr_id, new_mgr_int, length(to_add), length(to_remove)),
+        list(manager_id = old_mgr_id, participants = old_part_ids),
+        list(manager_id = new_mgr_int, participants = new_part_ints)
+      )
+      showNotification("人员设置已保存！", type = "message")
+      gantt_force_refresh(gantt_force_refresh() + 1L)
+    }, error = function(e) showNotification(paste0("保存失败：", conditionMessage(e)), type = "error"))
+  })
+
+  # ---------- Tab2: 临床中心管理 ----------
+  output$pc_center_ui <- renderUI({
+    pc_center_refresh()
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    proj_id <- ctx$proj_row_id
+    tryCatch({
+      linked <- DBI::dbGetQuery(pg_con,
+        paste0('SELECT t03.id AS link_id, h."医院名称"',
+               ' FROM public."03医院_项目表" t03',
+               ' LEFT JOIN public."01医院信息表" h ON h.id = t03."01_hos_resource_table医院信息表_id"',
+               ' WHERE t03."project_table 项目总表_id" = $1',
+               ' ORDER BY h."医院名称"'),
+        params = list(as.integer(proj_id)))
+      avail <- DBI::dbGetQuery(pg_con,
+        paste0('SELECT h.id, h."医院名称"',
+               ' FROM public."01医院信息表" h',
+               ' WHERE h.id NOT IN (',
+               '   SELECT t03."01_hos_resource_table医院信息表_id"',
+               '   FROM public."03医院_项目表" t03',
+               '   WHERE t03."project_table 项目总表_id" = $1',
+               '   AND t03."01_hos_resource_table医院信息表_id" IS NOT NULL',
+               ' )',
+               ' ORDER BY h."医院名称"'),
+        params = list(as.integer(proj_id)))
+      # setNames 的 names 不能含 NA（医院名称在库中可能为 NULL），否则报错 NAs are not allowed in subscripted assignments
+      avail_choices <- if (nrow(avail) > 0) {
+        ids <- as.character(avail$id)
+        raw_nm <- as.character(avail[["医院名称"]])
+        lbl <- vapply(seq_along(raw_nm), function(i) {
+          x <- raw_nm[i]
+          if (is.na(x) || !nzchar(trimws(x))) {
+            paste0("（医院名称未填 id=", avail$id[i], "）")
+          } else {
+            x
+          }
+        }, character(1))
+        if (any(duplicated(lbl))) {
+          lbl <- make.unique(lbl, sep = " ")
+        }
+        setNames(ids, lbl)
+      } else {
+        character(0)
+      }
+      tagList(
+        tags$p(tags$b("当前已关联临床中心："), style = "margin-bottom:6px;"),
+        if (nrow(linked) == 0) {
+          tags$p("（暂无关联中心）", style = "color:#999;")
+        } else {
+          tags$ul(lapply(seq_len(nrow(linked)), function(i) {
+            nm <- linked[["医院名称"]][i]
+            tags$li(if (is.na(nm) || !nzchar(trimws(as.character(nm))))
+              paste0("（医院名称未填，link_id=", linked$link_id[i], "）") else as.character(nm))
+          }))
+        },
+        tags$hr(),
+        tags$p(tags$b("新增临床中心："),
+               tags$small("（只可新增，不支持删除；触发器将自动维护 09 阶段实例）"),
+               style = "margin-bottom:6px;"),
+        if (length(avail_choices) == 0) {
+          tags$p("（所有医院已关联本项目，无可新增中心）", style = "color:#999;")
+        } else {
+          tagList(
+            selectInput("pc_new_center_id", "选择要新增的医院",
+              choices = c("请选择..." = "", avail_choices),
+              width = "100%"),
+            actionButton("btn_add_center", "新增中心", class = "btn-success")
+          )
+        }
+      )
+    }, error = function(e) tags$p(style = "color:red;", paste0("加载失败：", conditionMessage(e))))
+  })
+
+  observeEvent(input$btn_add_center, {
+    auth <- current_user_auth()
+    if (!isTRUE(auth$can_manage_project)) return()
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    hosp_id_str <- input$pc_new_center_id
+    if (is.null(hosp_id_str) || !nzchar(trimws(hosp_id_str))) {
+      showNotification("请先选择要新增的医院。", type = "warning")
+      return()
+    }
+    hosp_id <- suppressWarnings(as.integer(hosp_id_str))
+    if (is.na(hosp_id)) {
+      showNotification("医院选择无效。", type = "error")
+      return()
+    }
+    proj_id <- as.integer(ctx$proj_row_id)
+    tryCatch({
+      existing <- DBI::dbGetQuery(pg_con,
+        'SELECT id FROM public."03医院_项目表" WHERE "project_table 项目总表_id" = $1 AND "01_hos_resource_table医院信息表_id" = $2',
+        params = list(proj_id, hosp_id))
+      if (nrow(existing) > 0) {
+        showNotification("该医院已与本项目关联。", type = "warning")
+        return()
+      }
+      work_id_str <- if (!is.null(auth$work_id) && nzchar(auth$work_id)) auth$work_id else ""
+      DBI::dbExecute(pg_con,
+        'INSERT INTO public."03医院_项目表" ("project_table 项目总表_id", "01_hos_resource_table医院信息表_id", created_at1, created_by1) VALUES ($1, $2, NOW(), $3)',
+        params = list(proj_id, hosp_id, work_id_str))
+      hosp_name_row <- DBI::dbGetQuery(pg_con,
+        'SELECT "医院名称" FROM public."01医院信息表" WHERE id = $1',
+        params = list(hosp_id))
+      hosp_name <- if (nrow(hosp_name_row) > 0) as.character(hosp_name_row[["医院名称"]][1]) else as.character(hosp_id)
+      insert_audit_log(
+        pg_con, auth$work_id, auth$name,
+        "INSERT", "03医院_项目表", proj_id,
+        sprintf("项目 %s 新增临床中心 %s", ctx$project_id, hosp_name),
+        sprintf("新增医院 id=%d (%s)", hosp_id, hosp_name),
+        NULL,
+        list(proj_id = proj_id, hosp_id = hosp_id, hosp_name = hosp_name)
+      )
+      showNotification(sprintf("已成功新增中心：%s（触发器将自动创建相关阶段实例）", hosp_name), type = "message")
+      pc_center_refresh(pc_center_refresh() + 1L)
+      gantt_force_refresh(gantt_force_refresh() + 1L)
+    }, error = function(e) showNotification(paste0("新增中心失败：", conditionMessage(e)), type = "error"))
+  })
+
+  # ---------- Tab3: 修改项目名称 ----------
+  output$pc_proj_name_ui <- renderUI({
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    tryCatch({
+      cur_row <- DBI::dbGetQuery(pg_con,
+        'SELECT "\u9879\u76ee\u540d\u79f0" FROM public."\u0030\u0034\u9879\u76ee\u603b\u8868" WHERE id = $1',
+        params = list(as.integer(ctx$proj_row_id)))
+      cur_name <- if (nrow(cur_row) > 0 && !is.na(cur_row[[1]][1]))
+                    as.character(cur_row[[1]][1]) else ""
+      tagList(
+        tags$p(style = "color:#666; font-size:13px; margin-bottom:12px;",
+               "\u4fee\u6539\u540e\u70b9\u51fb\u300c\u4fdd\u5b58\u9879\u76ee\u540d\u79f0\u300d\u4f7f\u66f4\u6539\u751f\u6548\u3002"),
+        fluidRow(
+          column(8,
+            textInput("pc_proj_name_input", "\u9879\u76ee\u540d\u79f0",
+                      value = cur_name, width = "100%",
+                      placeholder = "\u8bf7\u8f93\u5165\u9879\u76ee\u540d\u79f0")
+          )
+        ),
+        actionButton("btn_save_proj_name", "\u4fdd\u5b58\u9879\u76ee\u540d\u79f0", class = "btn-primary")
+      )
+    }, error = function(e) tags$p(style = "color:red;", paste0("\u52a0\u8f7d\u5931\u8d25\uff1a", conditionMessage(e))))
+  })
+
+  observeEvent(input$btn_save_proj_name, {
+    auth <- current_user_auth()
+    if (!isTRUE(auth$can_manage_project)) return()
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    proj_id  <- as.integer(ctx$proj_row_id)
+    new_name <- trimws(input$pc_proj_name_input %||% "")
+    if (!nzchar(new_name)) {
+      showNotification("\u9879\u76ee\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a\u3002", type = "warning")
+      return()
+    }
+    tryCatch({
+      dup <- DBI::dbGetQuery(pg_con,
+        'SELECT id FROM public."\u0030\u0034\u9879\u76ee\u603b\u8868" WHERE "\u9879\u76ee\u540d\u79f0" = $1 AND id != $2',
+        params = list(new_name, proj_id))
+      if (nrow(dup) > 0) {
+        showNotification("\u5df2\u5b58\u5728\u540c\u540d\u9879\u76ee\uff0c\u8bf7\u4f7f\u7528\u4e0d\u540c\u7684\u9879\u76ee\u540d\u79f0\u3002", type = "warning")
+        return()
+      }
+      old_name <- ctx$project_id
+      DBI::dbExecute(pg_con,
+        'UPDATE public."\u0030\u0034\u9879\u76ee\u603b\u8868" SET "\u9879\u76ee\u540d\u79f0" = $1 WHERE id = $2',
+        params = list(new_name, proj_id))
+      insert_audit_log(
+        pg_con, auth$work_id, auth$name,
+        "UPDATE", "04\u9879\u76ee\u603b\u8868", proj_id,
+        sprintf("\u4fee\u6539\u9879\u76ee\u540d\u79f0 %s -> %s", old_name, new_name),
+        sprintf("\u9879\u76ee\u540d\u79f0: %s -> %s", old_name, new_name),
+        list("\u9879\u76ee\u540d\u79f0" = old_name),
+        list("\u9879\u76ee\u540d\u79f0" = new_name)
+      )
+      # \u66f4\u65b0 context \u4e2d\u7684\u9879\u76ee\u540d\u79f0\uff0c\u4f7f\u5f39\u7a97\u6807\u9898\u5237\u65b0
+      personnel_center_context(list(
+        proj_row_id = proj_id,
+        project_id  = new_name
+      ))
+      showNotification(sprintf("\u9879\u76ee\u540d\u79f0\u5df2\u66f4\u65b0\u4e3a\uff1a%s", new_name), type = "message")
+      gantt_force_refresh(gantt_force_refresh() + 1L)
+    }, error = function(e) showNotification(paste0("\u4fdd\u5b58\u5931\u8d25\uff1a", conditionMessage(e)), type = "error"))
+  })
+
+  # ==================== 编辑人员、中心 功能 end ====================
+
   output$remark_editor <- renderUI({
     ctx <- task_edit_context()
     if (is.null(ctx)) return(NULL)
@@ -3354,7 +4740,7 @@ server <- function(input, output, session) {
     existing <- ctx$contributors
     rows_ui <- if (n_rows > 0L) {
       lapply(seq_len(n_rows), function(i) {
-        person <- role <- work <- ""
+        person <- role <- work <- note_val <- ""
         amount <- 1
         if (!is.null(existing) && nrow(existing) >= i) {
           person <- as.character(existing$person[i])
@@ -3362,6 +4748,10 @@ server <- function(input, output, session) {
           work <- as.character(existing$work[i])
           amount <- suppressWarnings(as.numeric(existing$amount[i]))
           if (is.na(amount) || amount < 1) amount <- 1
+          if ("note" %in% names(existing)) {
+            note_val <- as.character(existing$note[i] %||% "")
+            if (is.na(note_val)) note_val <- ""
+          }
         }
         role_choices_i <- c("主导", "参与", "协助")
         if (nzchar(role) && !(role %in% role_choices_i)) role_choices_i <- c(role_choices_i, role)
@@ -3369,7 +4759,7 @@ server <- function(input, output, session) {
         if (nzchar(work) && !(work %in% work_choices_i)) work_choices_i <- c(work_choices_i, work)
         fluidRow(
           column(
-            3,
+            2,
             selectInput(
               paste0("contrib_person_", i),
               if (i == 1L) "人员" else NULL,
@@ -3378,7 +4768,7 @@ server <- function(input, output, session) {
             )
           ),
           column(
-            3,
+            2,
             selectizeInput(
               paste0("contrib_role_", i),
               if (i == 1L) "参与度" else NULL,
@@ -3398,13 +4788,22 @@ server <- function(input, output, session) {
             )
           ),
           column(
-            3,
+            2,
             numericInput(
               paste0("contrib_amount_", i),
               if (i == 1L) "数量" else NULL,
               value = amount,
               min = 1,
-              width = "100px"
+              width = "100%"
+            )
+          ),
+          column(
+            3,
+            textInput(
+              paste0("contrib_note_", i),
+              if (i == 1L) "备注（≤10字）" else NULL,
+              value = note_val,
+              placeholder = "选填，限10字"
             )
           )
         )
@@ -3423,7 +4822,7 @@ server <- function(input, output, session) {
       ),
       tags$hr(),
       tags$b("进度贡献者"),
-      tags$p(tags$small("每行：人员（从人员表选择） + 参与度（主导/参与/协助，可自定义） + 工作内容（阶段相关，可自定义） + 数量（>=1 的数字）。")),
+      tags$p(tags$small("每行：人员（从人员表选择） + 参与度（主导/参与/协助，可自定义） + 工作内容（阶段相关，可自定义） + 数量（>=1 的数字） + 备注（选填，限10字）。")),
       tags$div(style = "margin-top:10px;", rows_ui),
       actionButton("btn_add_contrib_row", "新增贡献者", class = "btn-success"),
       tags$p(tags$small("留空人员的行在保存时会被忽略。"))
@@ -3474,6 +4873,7 @@ server <- function(input, output, session) {
         person_i <- tryCatch(trimws(as.character(input[[paste0("contrib_person_", i)]])), error = function(e) "")
         role_i   <- tryCatch(trimws(as.character(input[[paste0("contrib_role_", i)]])), error = function(e) "")
         work_i   <- tryCatch(trimws(as.character(input[[paste0("contrib_work_", i)]])), error = function(e) "")
+        note_i   <- tryCatch(trimws(as.character(input[[paste0("contrib_note_", i)]])), error = function(e) "")
         raw_num <- tryCatch(input[[paste0("contrib_amount_", i)]], error = function(e) NA_real_)
         amt_num <- suppressWarnings(as.numeric(raw_num))
         if (is.na(amt_num) || amt_num < 1) amt_num <- 1
@@ -3484,12 +4884,13 @@ server <- function(input, output, session) {
           contrib_df$role[i] <- role_i
           contrib_df$work[i] <- work_i
           contrib_df$amount[i] <- as.character(amt_num)
+          contrib_df$note[i] <- note_i
         } else {
-          contrib_df[i, ] <- list(entry_key_i, person_i, role_i, work_i, as.character(amt_num))
+          contrib_df[i, ] <- list(entry_key_i, person_i, role_i, work_i, as.character(amt_num), note_i)
         }
       }
     }
-    contrib_df[nrow(contrib_df) + 1L, ] <- list("", "", "", "", "1")
+    contrib_df[nrow(contrib_df) + 1L, ] <- list("", "", "", "", "1", "")
     ctx$contributors <- contrib_df
     task_edit_context(ctx)
     contrib_row_count(n_cur + 1L)
@@ -3517,6 +4918,12 @@ server <- function(input, output, session) {
         p <- tryCatch(trimws(as.character(input[[paste0("contrib_person_", i)]])), error = function(e) "")
         r <- tryCatch(trimws(as.character(input[[paste0("contrib_role_", i)]])), error = function(e) "")
         w <- tryCatch(trimws(as.character(input[[paste0("contrib_work_", i)]])), error = function(e) "")
+        n_val <- tryCatch(trimws(as.character(input[[paste0("contrib_note_", i)]])), error = function(e) "")
+        if (is.na(n_val)) n_val <- ""
+        if (nchar(n_val, type = "chars") > 10) {
+          showNotification(sprintf("第 %d 行备注超过 10 个字，请缩减。", i), type = "error")
+          return()
+        }
         if (nzchar(p) && length(person_choices) > 0 && !(p %in% person_choices)) {
           showNotification(sprintf("不存在此人名：%s", p), type = "error")
           return()
@@ -3524,9 +4931,9 @@ server <- function(input, output, session) {
         raw_num <- tryCatch(input[[paste0("contrib_amount_", i)]], error = function(e) NA_real_)
         amt_num <- suppressWarnings(as.numeric(raw_num))
         if (nzchar(p)) {
-        if (is.na(amt_num) || amt_num < 1) {
-          showNotification("数量必须为不小于 1 的数字。", type = "error")
-          return()
+          if (is.na(amt_num) || amt_num < 1) {
+            showNotification("数量必须为不小于 1 的数字。", type = "error")
+            return()
           }
         } else {
           amt_num <- 1
@@ -3538,8 +4945,9 @@ server <- function(input, output, session) {
           contrib_df$role[i] <- r
           contrib_df$work[i] <- w
           contrib_df$amount[i] <- as.character(amt_num)
+          contrib_df$note[i] <- n_val
         } else {
-          contrib_df[i, ] <- list(entry_key_i, p, r, w, as.character(amt_num))
+          contrib_df[i, ] <- list(entry_key_i, p, r, w, as.character(amt_num), n_val)
         }
       }
     }
@@ -3777,13 +5185,10 @@ server <- function(input, output, session) {
   }
 
   refresh_milestone_context_from_db <- function(ctx) {
-    latest_row <- fetch_row_snapshot(pg_con, ctx$table_name, ctx$stage_instance_id, "milestones_json", lock = FALSE)
+    latest_row <- fetch_row_snapshot(pg_con, ctx$milestone_table, ctx$milestone_row_id, "milestones_json", lock = FALSE)
     if (is.null(latest_row)) return(NULL)
     ctx$milestone_raw <- latest_row[["milestones_json"]]
     ctx$milestones <- parse_milestone_json_to_df(latest_row[["milestones_json"]])
-    if (!is.null(ctx$milestones) && nrow(ctx$milestones) > 0) {
-      ctx$milestones <- ctx$milestones[ctx$milestones$stage_key == (ctx$milestone_stage_key %||% ctx$task_name), , drop = FALSE]
-    }
     ctx
   }
 
@@ -3801,21 +5206,19 @@ server <- function(input, output, session) {
         ac <- tryCatch(trimws(as.character(input[[paste0("ms_actual_", i)]])), error = function(e) "")
         nt <- tryCatch(trimws(as.character(input[[paste0("ms_note_", i)]])), error = function(e) "")
         entry_key_i <- if (nrow(ms_df) >= i) as.character(ms_df$entry_key[i]) else ""
-        stage_key_i <- if (nrow(ms_df) >= i) as.character(ms_df$stage_key[i]) else (ctx$milestone_stage_key %||% ctx$task_name)
         if (i <= nrow(ms_df)) {
           ms_df$entry_key[i] <- entry_key_i
-          ms_df$stage_key[i] <- stage_key_i
           ms_df$name[i] <- nm
           ms_df$plan[i] <- pl
           ms_df$actual[i] <- ac
           ms_df$note[i] <- nt
         } else {
-          ms_df[i, ] <- list(entry_key_i, stage_key_i, nm, pl, ac, nt)
+          ms_df[i, ] <- list(entry_key_i, nm, pl, ac, nt)
         }
       }
     }
     # 新增一空行
-    ms_df[nrow(ms_df) + 1, ] <- list("", ctx$milestone_stage_key %||% ctx$task_name, "", "", "", "")
+    ms_df[nrow(ms_df) + 1, ] <- list("", "", "", "", "")
     ctx$milestones <- ms_df
     task_edit_context(ctx)
     milestone_row_count(nrow(ms_df))
@@ -3832,7 +5235,6 @@ server <- function(input, output, session) {
     actor_name <- normalize_text(auth$name)
     if (is.na(actor_name)) actor_name <- normalize_text(auth$work_id)
     if (is.na(actor_name)) actor_name <- "未知用户"
-    stage_key <- ctx$milestone_stage_key %||% ctx$task_name
 
     if (n_rows > 0L) {
       for (i in seq_len(n_rows)) {
@@ -3841,46 +5243,41 @@ server <- function(input, output, session) {
         ac <- tryCatch(trimws(as.character(input[[paste0("ms_actual_", i)]])), error = function(e) "")
         nt <- tryCatch(trimws(as.character(input[[paste0("ms_note_", i)]])), error = function(e) "")
         if (nzchar(nm)) {
-        if (nzchar(pl)) {
-          pl_date <- tryCatch(as.Date(pl, optional = TRUE), error = function(e) NA)
-          if (is.na(pl_date)) {
-            showNotification(sprintf("里程碑「%s」的计划达成时间格式不正确：%s", nm, pl), type = "error")
-            return()
+          if (nzchar(pl)) {
+            pl_date <- tryCatch(as.Date(pl, optional = TRUE), error = function(e) NA)
+            if (is.na(pl_date)) {
+              showNotification(sprintf("里程碑「%s」的计划达成时间格式不正确：%s", nm, pl), type = "error")
+              return()
+            }
           }
-        }
-        if (nzchar(ac)) {
-          ac_date <- tryCatch(as.Date(ac, optional = TRUE), error = function(e) NA)
-          if (is.na(ac_date)) {
-            showNotification(sprintf("里程碑「%s」的实际达成时间格式不正确：%s", nm, ac), type = "error")
-            return()
+          if (nzchar(ac)) {
+            ac_date <- tryCatch(as.Date(ac, optional = TRUE), error = function(e) NA)
+            if (is.na(ac_date)) {
+              showNotification(sprintf("里程碑「%s」的实际达成时间格式不正确：%s", nm, ac), type = "error")
+              return()
             }
           }
         }
         entry_key_i <- if (nrow(ms_df) >= i) as.character(ms_df$entry_key[i]) else ""
         if (i <= nrow(ms_df)) {
           ms_df$entry_key[i] <- entry_key_i
-          ms_df$stage_key[i] <- stage_key
           ms_df$name[i] <- nm
           ms_df$plan[i] <- pl
           ms_df$actual[i] <- ac
           ms_df$note[i] <- nt
         } else {
-          ms_df[i, ] <- list(entry_key_i, stage_key, nm, pl, ac, nt)
+          ms_df[i, ] <- list(entry_key_i, nm, pl, ac, nt)
         }
       }
     }
     if (n_rows < nrow(ms_df)) ms_df <- ms_df[seq_len(n_rows), , drop = FALSE]
 
+    # 里程碑现在是项目/子中心维度，用户编辑的即全量；直接用用户结果替换整个 JSON
     snapshot_ms_map <- parse_named_json_map(ctx$milestone_raw)
-    snapshot_ms_df <- parse_milestone_json_to_df(ctx$milestone_raw)
-    current_stage_keys <- if (nrow(snapshot_ms_df) > 0) snapshot_ms_df$entry_key[snapshot_ms_df$stage_key == stage_key] else character(0)
-    user_stage_map <- build_milestone_map_from_df(ms_df, actor = actor_name)
-    user_ms_map <- snapshot_ms_map
-    for (k in current_stage_keys) user_ms_map[[k]] <- NULL
-    for (k in names(user_stage_map)) user_ms_map[[k]] <- user_stage_map[[k]]
+    user_ms_map <- build_milestone_map_from_df(ms_df, actor = actor_name)
 
-    tbl <- ctx$table_name
-    row_id <- ctx$stage_instance_id
+    tbl <- ctx$milestone_table
+    row_id <- ctx$milestone_row_id
     if (is.na(row_id)) {
       removeModal()
       return()
@@ -3951,9 +5348,6 @@ server <- function(input, output, session) {
       )
       ctx$milestone_raw <- result$final_json
       ctx$milestones <- parse_milestone_json_to_df(result$final_json)
-      if (!is.null(ctx$milestones) && nrow(ctx$milestones) > 0) {
-        ctx$milestones <- ctx$milestones[ctx$milestones$stage_key == stage_key, , drop = FALSE]
-      }
       task_edit_context(ctx)
       milestone_row_count(nrow(ctx$milestones))
       gantt_force_refresh(gantt_force_refresh() + 1L)

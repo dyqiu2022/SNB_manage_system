@@ -30,7 +30,7 @@ SELECT
   si.remark_json::text AS remark,
   si.remark_json,
   si.contributors_json,
-  si.milestones_json,
+  CASE WHEN d.stage_scope = 'sync' THEN p.milestones_json ELSE s.milestones_json END AS milestones_json,
   si.sample_json,
   si.row_version,
   mgr."姓名" AS manager_name
