@@ -1950,10 +1950,6 @@ server <- function(input, output, session) {
             style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
             `data-mode` = cm,
             combine_lbl
-          ),
-          tags$span(
-            style = "font-size: 12px; color: #666; flex: 1; min-width: 120px;",
-            "维度叠加；各栏多选为「或」"
           )
         ),
         if (!is.null(opts)) tagList(
@@ -3772,7 +3768,6 @@ server <- function(input, output, session) {
             tags$div(
               class = "well",
               style = "margin-top: 12px; margin-bottom: 0; padding: 16px 18px; border-radius: 8px; background: #fafafa; border: 1px solid #e8e8e8; max-height: 58vh; overflow-y: auto;",
-              tags$p(tags$small("全中心、全阶段汇总；按类型分块展示。类型顺序：卡点 → 问题 → 经验分享 → 其余类型（字母序）→ 无类型；类型内按反馈日期、反馈人降序；序号仅在各类型内连续。", style = "color:#666; margin-bottom: 10px; display: block;")),
               ui_remarks
             )
           ),
@@ -3787,18 +3782,10 @@ server <- function(input, output, session) {
                   style = "display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px;",
                   tags$div(
                     style = "flex: 1; min-width: 0;",
-                    tags$div(
-                      id = "proj_summary_contrib_hint_person",
-                      tags$p(
-                        tags$small("仅汇总 is_active 的 09 阶段实例中的贡献；相同参与度与工作内容已合并数量。", style = "color:#666; margin-bottom: 0; display: block;")
-                      )
-                    ),
+                    tags$div(id = "proj_summary_contrib_hint_person"),
                     tags$div(
                       id = "proj_summary_contrib_hint_stage",
-                      style = "display: none;",
-                      tags$p(
-                        tags$small("仅含 is_active 的 09 阶段实例。各中心进度：有实际结束则 100%；否则须有计划起止且已填实际开始才用库内进度，否则 0%。从左到右与甘特顺序一致。参与度：主导（红）、参与（蓝）、协助（绿）。", style = "color:#666; margin-bottom: 0; display: block;")
-                      )
+                      style = "display: none;"
                     )
                   ),
                   tags$button(
