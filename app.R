@@ -306,9 +306,9 @@ ui <- fluidPage(
       })();
     ")),
     tags$script(HTML("
-      // 甘特筛选「且条件 / 或条件」：与项目汇总贡献者切换相同，点击即时改文案 + 同步 Shiny
+      // 甘特 / 会议决策 筛选「且条件 / 或条件」：点击即时改文案 + 同步 Shiny
       (function() {
-        $(document).on('click', '#gantt_filter_combine_btn', function(e) {
+        $(document).on('click', '#gantt_filter_combine_btn, #mtg_filter_combine_btn', function(e) {
           e.preventDefault();
           var btn = $(this);
           var mode = btn.attr('data-mode') || 'and';
@@ -316,7 +316,8 @@ ui <- fluidPage(
           btn.attr('data-mode', mode);
           btn.text(mode === 'and' ? '且条件' : '或条件');
           if (window.Shiny && Shiny.setInputValue) {
-            Shiny.setInputValue('gantt_filter_combine_mode', mode, { priority: 'event' });
+            var inputName = btn.attr('id') === 'gantt_filter_combine_btn' ? 'gantt_filter_combine_mode' : 'mtg_filter_combine_mode';
+            Shiny.setInputValue(inputName, mode, { priority: 'event' });
           }
         });
       })();
@@ -436,7 +437,8 @@ ui <- fluidPage(
       .gantt-sidebar-wrap.collapsed .gantt-sidebar-body {
         display: none !important;
       }
-      .gantt-sidebar-wrap.collapsed #gantt_sidebar_toggle {
+      .gantt-sidebar-wrap.collapsed #gantt_sidebar_toggle,
+      .gantt-sidebar-wrap.collapsed #meeting_sidebar_toggle {
         width: 100% !important;
         max-width: 24px;
         min-width: 22px;
@@ -445,6 +447,20 @@ ui <- fluidPage(
         font-size: 13px;
         line-height: 1;
       }
+      .btn-del-row {
+        flex-shrink: 0;
+        align-self: flex-start;
+        margin-top: 24px;
+        margin-left: 6px;
+        padding: 4px 8px !important;
+        font-size: 13px !important;
+        line-height: 1.2 !important;
+        color: #c62828 !important;
+        border: 1px solid #e0e0e0;
+        background: #fff !important;
+        cursor: pointer;
+      }
+      .btn-del-row:hover { background: #ffebee !important; border-color: #ef9a9a; }
       .gantt-main-wrap {
         flex: 1 1 auto;
         min-width: 0;
@@ -465,11 +481,86 @@ ui <- fluidPage(
         .gantt-sidebar-wrap.collapsed .gantt-sidebar-body { display: none !important; }
         .gantt-main-wrap { padding-left: 0; }
       }
+      /* 会议决策行布局与甘特共用 gantt-row-flex / gantt-sidebar-wrap / gantt-main-wrap */
+      .meeting-panel {
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        margin-bottom: 16px;
+        background: #fff;
+      }
+      .meeting-panel-heading {
+        background: #f5f5f5;
+        padding: 10px 14px;
+        border-bottom: 1px solid #ddd;
+        border-radius: 6px 6px 0 0;
+        font-weight: bold;
+        font-size: 15px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .meeting-panel-body {
+        padding: 12px 14px;
+      }
+      .meeting-project-group {
+        border-left: 3px solid #2196F3;
+        padding-left: 12px;
+        margin-bottom: 12px;
+      }
+      .meeting-decision-item {
+        padding: 8px 0;
+        border-bottom: 1px solid #eee;
+      }
+      .meeting-decision-item:last-child { border-bottom: none; }
+      .executor-tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 3px;
+        margin: 2px 4px 2px 0;
+        font-size: 13px;
+      }
+      .executor-pending { color: #C62828; font-weight: bold; }
+      .executor-done { color: #2E7D32; font-weight: bold; }
+      /* 历史会议：仅「已执行/未执行」上色，姓名保持默认色 */
+      .executor-status-pending { color: #C62828; font-weight: bold; }
+      .executor-status-done { color: #2E7D32; font-weight: bold; }
+      a.meeting-exec-actionlink:hover { text-decoration: underline !important; }
+      /* 历史会议执行人：每行 4 格，格内过长自动换行 */
+      .meeting-exec-wrap { margin-top: 8px; font-size: 13px; line-height: 1.5; width: 100%; box-sizing: border-box; }
+      .meeting-exec-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px 12px;
+        margin-top: 6px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .meeting-exec-cell {
+        min-width: 0;
+        max-width: 100%;
+        word-wrap: break-word;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        border: 1px solid #e8e8e8;
+        border-radius: 4px;
+        padding: 6px 8px;
+        box-sizing: border-box;
+        background: #fafafa;
+        align-self: start;
+      }
+      .meeting-exec-cell a.meeting-exec-actionlink {
+        display: block;
+        white-space: normal !important;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
     ")),
     tags$script(HTML("
-      $(document).on('click', '#gantt_sidebar_toggle', function() {
-        $('#gantt_sidebar_col').toggleClass('collapsed');
-        var c = $('#gantt_sidebar_col').hasClass('collapsed');
+      $(document).on('click', '#gantt_sidebar_toggle, #meeting_sidebar_toggle', function() {
+        var col = $(this).closest('.gantt-sidebar-wrap');
+        if (!col.length) return;
+        col.toggleClass('collapsed');
+        var c = col.hasClass('collapsed');
         if (c) {
           $(this).text('\\u25b6');
           $(this).attr('title', '\\u5c55\\u5f00\\u7b5b\\u9009');
@@ -484,48 +575,61 @@ ui <- fluidPage(
   ),
   uiOutput("app_title_panel"),
   uiOutput("current_user_display"),
-  fluidRow(
-    column(
-      12,
-      tags$div(
-        id = "gantt_row_flex",
-        class = "gantt-row-flex",
-        tags$div(
-          id = "gantt_sidebar_col",
-          class = "gantt-sidebar-wrap",
-          tags$button(
-            type = "button",
-            id = "gantt_sidebar_toggle",
-            class = "btn btn-default btn-sm",
-            title = "收起筛选",
-            style = "width: 100%; margin-bottom: 10px; white-space: nowrap;",
-            "◀ 收起筛选"
-          ),
+  tabsetPanel(
+    id = "main_tabs",
+    type = "tabs",
+    tabPanel(
+      "项目甘特图",
+      value = "tab_gantt",
+      fluidRow(
+        column(
+          12,
           tags$div(
-            class = "gantt-sidebar-body",
-            uiOutput("gantt_filters"),
-            uiOutput("gantt_db_msg")
+            id = "gantt_row_flex",
+            class = "gantt-row-flex",
+            tags$div(
+              id = "gantt_sidebar_col",
+              class = "gantt-sidebar-wrap",
+              tags$button(
+                type = "button",
+                id = "gantt_sidebar_toggle",
+                class = "btn btn-default btn-sm",
+                title = "收起筛选",
+                style = "width: 100%; margin-bottom: 10px; white-space: nowrap;",
+                "◀ 收起筛选"
+              ),
+              tags$div(
+                class = "gantt-sidebar-body",
+                uiOutput("gantt_filters"),
+                uiOutput("gantt_db_msg")
+              )
+            ),
+            tags$div(
+              class = "gantt-main-wrap",
+              HTML("
+             <div style='margin-bottom: 10px; font-size: 12px; color: #555;'>
+               <b>进度诊断图例：</b>
+                       <span style='margin-left:15px; padding:2px 8px; background:#EDEDED; border:1px solid #D0D0D0; border-radius:3px; color:#555;'>未制定计划 (白灰)</span>
+                       <span style='margin-left:15px; padding:2px 8px; background:#9E9E9E; border:2px solid #9E9E9E; border-radius:3px; color:white;'>未开始 (深灰)：未到计划启动，或已填计划起止但未填实际开始</span>
+                   <span style='margin-left:15px; padding:2px 8px; background:#F44336; border:2px solid #F44336; border-radius:3px; color:white;'>落后50%以上</span>
+                   <span style='margin-left:10px; padding:2px 8px; background:#FF6F00; border:2px solid #FF6F00; border-radius:3px; color:white;'>落后30%-50%</span>
+                   <span style='margin-left:10px; padding:2px 8px; background:#FFC107; border:2px solid #FFC107; border-radius:3px; color:white;'>落后15%-30%</span>
+                   <span style='margin-left:10px; padding:2px 8px; background:#FFEB3B; border:2px solid #FFEB3B; border-radius:3px; color:#333;'>落后5%-15%</span>
+                   <span style='margin-left:10px; padding:2px 8px; background:#CDDC39; border:2px solid #CDDC39; border-radius:3px; color:#333;'>偏差5%以内/超前10%以内</span>
+                   <span style='margin-left:10px; padding:2px 8px; background:#8BC34A; border:2px solid #8BC34A; border-radius:3px; color:#333;'>超前10%-25%</span>
+                   <span style='margin-left:10px; padding:2px 8px; background:#4CAF50; border:2px solid #4CAF50; border-radius:3px; color:white;'>超前25%以上</span>
+                 </div>
+             "),
+              timevisOutput("my_gantt", height = "100%")
+            )
           )
-        ),
-        tags$div(
-          class = "gantt-main-wrap",
-          HTML("
-         <div style='margin-bottom: 10px; font-size: 12px; color: #555;'>
-           <b>进度诊断图例：</b>
-                   <span style='margin-left:15px; padding:2px 8px; background:#EDEDED; border:1px solid #D0D0D0; border-radius:3px; color:#555;'>未制定计划 (白灰)</span>
-                   <span style='margin-left:15px; padding:2px 8px; background:#9E9E9E; border:2px solid #9E9E9E; border-radius:3px; color:white;'>未开始 (深灰)：未到计划启动，或已填计划起止但未填实际开始</span>
-               <span style='margin-left:15px; padding:2px 8px; background:#F44336; border:2px solid #F44336; border-radius:3px; color:white;'>落后50%以上</span>
-               <span style='margin-left:10px; padding:2px 8px; background:#FF6F00; border:2px solid #FF6F00; border-radius:3px; color:white;'>落后30%-50%</span>
-               <span style='margin-left:10px; padding:2px 8px; background:#FFC107; border:2px solid #FFC107; border-radius:3px; color:white;'>落后15%-30%</span>
-               <span style='margin-left:10px; padding:2px 8px; background:#FFEB3B; border:2px solid #FFEB3B; border-radius:3px; color:#333;'>落后5%-15%</span>
-               <span style='margin-left:10px; padding:2px 8px; background:#CDDC39; border:2px solid #CDDC39; border-radius:3px; color:#333;'>偏差5%以内/超前10%以内</span>
-               <span style='margin-left:10px; padding:2px 8px; background:#8BC34A; border:2px solid #8BC34A; border-radius:3px; color:#333;'>超前10%-25%</span>
-               <span style='margin-left:10px; padding:2px 8px; background:#4CAF50; border:2px solid #4CAF50; border-radius:3px; color:white;'>超前25%以上</span>
-             </div>
-         "),
-          timevisOutput("my_gantt", height = "100%")
         )
       )
+    ),
+    tabPanel(
+      "会议决策",
+      value = "tab_meeting",
+      uiOutput("meeting_tab_ui")
     )
   )
 )
@@ -550,6 +654,15 @@ server <- function(input, output, session) {
   personnel_center_context <- reactiveVal(NULL)
   pc_center_refresh <- reactiveVal(0L)
 
+  # ---------- 会议决策 reactiveVal ----------
+  meeting_force_refresh <- reactiveVal(0L)
+  meeting_new_proj_count <- reactiveVal(1L)
+  meeting_new_dec_counts <- reactiveVal(list(1))  # list per project group
+  # 新建会议表单快照：在「添加行/项目/删行」导致 renderUI 重建前写入，避免已填内容被清空
+  meeting_new_form_state <- reactiveVal(NULL)
+  meeting_edit_ctx <- reactiveVal(NULL)
+  executor_modal_ctx <- reactiveVal(NULL)
+
   # ---------- 操作审计：写入 07操作审计表 ----------
   insert_audit_log <- function(conn, work_id, name, op_type, target_table, target_row_id, biz_desc, summary, old_val, new_val, remark = NULL) {
     if (is.null(conn) || !DBI::dbIsValid(conn)) return(invisible(NULL))
@@ -569,6 +682,72 @@ server <- function(input, output, session) {
       DBI::dbExecute(conn, q, params = list(work_id, name, op_type, target_table, as.integer(target_row_id), biz_desc, summary, old_json, new_json, remark))
     }, error = function(e) NULL)
     invisible(NULL)
+  }
+
+  # ---------- 会议决策辅助函数 ----------
+
+  # 获取项目的负责人+参与人，返回 c("姓名-工号" = "人员id", ...)
+  get_project_persons <- function(conn, project_id) {
+    tryCatch({
+      # 负责人
+      mgr <- DBI::dbGetQuery(conn,
+        'SELECT p.id, p."姓名", p."工号" FROM public."05人员表" p INNER JOIN public."04项目总表" g ON g."05人员表_id" = p.id WHERE g.id = $1 AND p."人员状态" = \'在职\'',
+        params = list(as.integer(project_id)))
+      # 参与人
+      parts <- DBI::dbGetQuery(conn,
+        'SELECT p.id, p."姓名", p."工号" FROM public."05人员表" p INNER JOIN public."_nc_m2m_04项目总表_05人员表" m ON m."05人员表_id" = p.id WHERE m."04项目总表_id" = $1 AND p."人员状态" = \'在职\'',
+        params = list(as.integer(project_id)))
+      all_p <- unique(rbind(mgr, parts))
+      if (nrow(all_p) == 0) return(character(0))
+      labels <- paste0(all_p[["姓名"]], "-", all_p[["工号"]])
+      setNames(as.character(all_p$id), labels)
+    }, error = function(e) character(0))
+  }
+
+  # 根据人员ID列表构建初始执行人JSON
+  build_executor_json <- function(conn, person_ids) {
+    if (length(person_ids) == 0) return("{}")
+    tryCatch({
+      ph <- paste0("$", seq_along(person_ids))
+      q <- sprintf('SELECT id, "姓名", "工号" FROM public."05人员表" WHERE id IN (%s)',
+                   paste(ph, collapse = ", "))
+      df <- DBI::dbGetQuery(conn, q, params = as.list(as.integer(person_ids)))
+      if (nrow(df) == 0) return("{}")
+      keys <- paste0(df[["姓名"]], "-", df[["工号"]])
+      result <- list()
+      for (k in keys) result[[k]] <- list(状态 = "未执行", 说明 = "")
+      jsonlite::toJSON(result, auto_unbox = TRUE)
+    }, error = function(e) "{}")
+  }
+
+  # 解析执行人JSON为data.frame
+  parse_executor_json <- function(json_text) {
+    json_text <- as.character(json_text)
+    if (is.null(json_text) || length(json_text) == 0 || is.na(json_text) || !nzchar(trimws(json_text)) || trimws(json_text) == "null") {
+      return(data.frame(key = character(0), 状态 = character(0), 说明 = character(0), stringsAsFactors = FALSE))
+    }
+    tryCatch({
+      lst <- jsonlite::fromJSON(json_text, simplifyVector = FALSE)
+      if (length(lst) == 0) return(data.frame(key = character(0), 状态 = character(0), 说明 = character(0), stringsAsFactors = FALSE))
+      keys <- names(lst)
+      statuses <- sapply(keys, function(k) lst[[k]][["状态"]] %||% "未执行")
+      notes <- sapply(keys, function(k) lst[[k]][["说明"]] %||% "")
+      data.frame(key = keys, 状态 = statuses, 说明 = notes, stringsAsFactors = FALSE)
+    }, error = function(e) data.frame(key = character(0), 状态 = character(0), 说明 = character(0), stringsAsFactors = FALSE))
+  }
+
+  # 执行人 JSON 键为「姓名-工号」：界面只展示姓名（工号仅用于库内防重名）
+  executor_display_name_from_key <- function(key) {
+    k <- trimws(as.character(key %||% ""))
+    if (!nzchar(k)) return("")
+    parts <- strsplit(k, "-", fixed = TRUE)[[1]]
+    if (length(parts) < 2L) return(k)
+    paste(parts[-length(parts)], collapse = "-")
+  }
+
+  # 获取会议决策的下一个id
+  meeting_next_id <- function(conn) {
+    as.integer(DBI::dbGetQuery(conn, 'SELECT COALESCE(MAX(id), 0) + 1 AS nid FROM public."10会议决策表"')$nid[1])
   }
 
   `%||%` <- function(x, y) {
@@ -1872,12 +2051,18 @@ server <- function(input, output, session) {
 
   output$current_user_display <- renderUI({
     auth <- current_user_auth()
-    if (is.null(auth) || auth$allow_none) return(tags$p(style = "color: #888; font-size: 13px; margin: 4px 0;", "当前登录帐号：未登录"))
+    if (is.null(auth) || auth$allow_none) return(tags$div(style = "display: flex; align-items: center;",
+      tags$p(style = "color: #888; font-size: 13px; margin: 4px 0;", "当前登录帐号：未登录"),
+      tags$a(href = "/", "返回导航页", style = "margin-left: 20px; font-size: 13px;")))
     wid <- auth$work_id
     name <- auth$name
-    if (!nzchar(wid) && !nzchar(name)) return(tags$p(style = "color: #888; font-size: 13px; margin: 4px 0;", "当前登录帐号：—"))
+    if (!nzchar(wid) && !nzchar(name)) return(tags$div(style = "display: flex; align-items: center;",
+      tags$p(style = "color: #888; font-size: 13px; margin: 4px 0;", "当前登录帐号：—"),
+      tags$a(href = "/", "返回导航页", style = "margin-left: 20px; font-size: 13px;")))
     txt <- if (nzchar(name) && nzchar(wid)) paste0(name, "-", wid) else if (nzchar(wid)) wid else name
-    tags$p(style = "color: #333; font-size: 13px; margin: 4px 0;", paste0("当前登录帐号：", txt))
+    tags$div(style = "display: flex; align-items: center;",
+      tags$p(style = "color: #333; font-size: 13px; margin: 4px 0;", paste0("当前登录帐号：", txt)),
+      tags$a(href = "/", "返回导航页", style = "margin-left: 20px; font-size: 13px;"))
   })
 
   # 筛选器选项：按当前用户权限仅索要可访问维度的 distinct 清单（数据库层筛选）
@@ -1966,6 +2151,113 @@ server <- function(input, output, session) {
         )
       )
     )
+  })
+
+  # ---------- 会议决策数据查询 ----------
+
+  # 会议筛选：维度内多选为「任一命中」；维度间按 combine_mode 与甘特一致（且 = 各活跃维度同时满足，或 = 至少一维满足）
+  filter_meeting_decisions_by_dims <- function(df, fn, fp, fe, combine_mode) {
+    n <- nrow(df)
+    if (n == 0L) return(df)
+    fn <- as.character(fn %||% character(0))
+    fp <- as.character(fp %||% character(0))
+    fe <- as.character(fe %||% character(0))
+    active_name <- length(fn) > 0L
+    active_proj <- length(fp) > 0L
+    active_exec <- length(fe) > 0L
+    if (!active_name && !active_proj && !active_exec) return(df)
+    name_ok <- if (!active_name) rep(TRUE, n) else !is.na(df[["会议名称"]]) & df[["会议名称"]] %in% fn
+    proj_ok <- if (!active_proj) rep(TRUE, n) else !is.na(df[["项目名称"]]) & df[["项目名称"]] %in% fp
+    exec_ok <- if (!active_exec) {
+      rep(TRUE, n)
+    } else {
+      vapply(seq_len(n), function(i) {
+        edf <- parse_executor_json(df[["决策执行人及执行确认"]][i])
+        if (nrow(edf) == 0L) return(FALSE)
+        any(edf[["key"]] %in% fe)
+      }, logical(1L), USE.NAMES = FALSE)
+    }
+    cm <- if (is.null(combine_mode) || !combine_mode %in% c("and", "or")) "and" else combine_mode
+    if (identical(cm, "or")) {
+      mask <- rep(FALSE, n)
+      if (active_name) mask <- mask | name_ok
+      if (active_proj) mask <- mask | proj_ok
+      if (active_exec) mask <- mask | exec_ok
+      df[mask, , drop = FALSE]
+    } else {
+      df[name_ok & proj_ok & exec_ok, , drop = FALSE]
+    }
+  }
+
+  # 会议数据：查询 10表 LEFT JOIN 04表
+  meeting_data <- reactive({
+    meeting_force_refresh()
+    input$mtg_filter_name %||% NULL
+    input$mtg_filter_date_start %||% NULL
+    input$mtg_filter_date_end %||% NULL
+    input$mtg_filter_project %||% NULL
+    input$mtg_filter_executor %||% NULL
+    input$mtg_filter_combine_mode
+    if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return(data.frame())
+    auth <- current_user_auth()
+    if (auth$allow_none) return(data.frame())
+    tryCatch({
+      if (auth$allow_all) {
+        and_auth <- ""
+      } else {
+        and_auth <- paste0(' AND (t."04项目总表_id" IS NULL OR t."04项目总表_id" IN (', auth$allowed_subquery, '))')
+      }
+      q <- paste0('SELECT t.id, t."会议名称", t."会议时间", t."04项目总表_id", t."决策内容", t."决策执行人及执行确认"::text AS "决策执行人及执行确认", t.created_at, t.updated_at, t.created_by, t.updated_by, COALESCE(g."项目名称", \'共性决策\') AS "项目名称" FROM public."10会议决策表" t LEFT JOIN public."04项目总表" g ON t."04项目总表_id" = g.id WHERE 1=1', and_auth, ' ORDER BY t."会议时间" DESC, t.id')
+      df <- DBI::dbGetQuery(pg_con, q)
+
+      fn <- if (is.null(input$mtg_filter_name)) character(0) else as.character(input$mtg_filter_name)
+      fp <- if (is.null(input$mtg_filter_project)) character(0) else as.character(input$mtg_filter_project)
+      fe <- if (is.null(input$mtg_filter_executor)) character(0) else as.character(input$mtg_filter_executor)
+      df <- filter_meeting_decisions_by_dims(df, fn, fp, fe, input$mtg_filter_combine_mode)
+
+      if (!is.null(input$mtg_filter_date_start) && !is.na(input$mtg_filter_date_start)) {
+        ds <- as.POSIXct(as.Date(input$mtg_filter_date_start))
+        df <- df[!is.na(df[["会议时间"]]) & df[["会议时间"]] >= ds, , drop = FALSE]
+      }
+      if (!is.null(input$mtg_filter_date_end) && !is.na(input$mtg_filter_date_end)) {
+        de <- as.POSIXct(paste0(as.Date(input$mtg_filter_date_end), " 23:59:59"))
+        df <- df[!is.na(df[["会议时间"]]) & df[["会议时间"]] <= de, , drop = FALSE]
+      }
+      df
+    }, error = function(e) data.frame())
+  })
+
+  # 会议筛选器选项
+  meeting_filter_options <- reactive({
+    meeting_force_refresh()
+    if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return(list(meeting_names = character(0), projects = character(0), executors = character(0)))
+    auth <- current_user_auth()
+    if (auth$allow_none) return(list(meeting_names = character(0), projects = character(0), executors = character(0)))
+    tryCatch({
+      if (auth$allow_all) {
+        and_auth <- ""
+      } else {
+        and_auth <- paste0(' AND (t."04项目总表_id" IS NULL OR t."04项目总表_id" IN (', auth$allowed_subquery, '))')
+      }
+      names_q <- paste0('SELECT DISTINCT t."会议名称" FROM public."10会议决策表" t WHERE t."会议名称" IS NOT NULL', and_auth, ' ORDER BY 1')
+      meeting_names <- DBI::dbGetQuery(pg_con, names_q)[[1]]
+
+      proj_q <- paste0("SELECT DISTINCT COALESCE(g.\"项目名称\", '共性决策') AS \"项目名称\" FROM public.\"10会议决策表\" t LEFT JOIN public.\"04项目总表\" g ON t.\"04项目总表_id\" = g.id WHERE 1=1", and_auth, ' ORDER BY 1')
+      projects <- DBI::dbGetQuery(pg_con, proj_q)[[1]]
+
+      # 执行人列表从所有决策的JSON中提取
+      exec_q <- paste0('SELECT DISTINCT t."决策执行人及执行确认"::text AS "决策执行人及执行确认" FROM public."10会议决策表" t WHERE t."决策执行人及执行确认" IS NOT NULL', and_auth)
+      exec_df <- DBI::dbGetQuery(pg_con, exec_q)
+      executor_set <- character(0)
+      for (js in exec_df[[1]]) {
+        if (is.na(js) || !nzchar(as.character(js))) next
+        parsed <- parse_executor_json(js)
+        if (nrow(parsed) > 0) executor_set <- unique(c(executor_set, parsed$key))
+      }
+      executor_set <- sort(executor_set)
+
+      list(meeting_names = meeting_names, projects = projects, executors = executor_set)
+    }, error = function(e) list(meeting_names = character(0), projects = character(0), executors = character(0)))
   })
 
   gantt_data_db <- reactive({
@@ -5841,6 +6133,788 @@ server <- function(input, output, session) {
     } else {
       apply_task_save("block")
     }
+  })
+
+  # ==================== 会议决策 renderUI ====================
+  # 外壳不依赖 meeting_filter_options，避免「从数据库刷新」时重置日期；选项由 meeting_filter_controls 单独刷新
+
+  output$meeting_tab_ui <- renderUI({
+    ed <- Sys.Date()
+    st <- seq(ed, by = "-1 month", length.out = 4L)[4L]
+    tagList(
+      tags$div(
+        class = "gantt-row-flex",
+        tags$div(
+          id = "meeting_sidebar_col",
+          class = "gantt-sidebar-wrap",
+          tags$button(
+            type = "button",
+            id = "meeting_sidebar_toggle",
+            class = "btn btn-default btn-sm",
+            title = "收起筛选",
+            style = "width: 100%; margin-bottom: 10px; white-space: nowrap;",
+            "◀ 收起筛选"
+          ),
+          tags$div(
+            class = "gantt-sidebar-body",
+            tags$div(
+              class = "panel panel-default",
+              style = "margin-bottom: 8px;",
+              tags$div(class = "panel-heading", style = "padding: 8px 12px; font-size: 14px;", tags$b("筛选与刷新")),
+              tags$div(
+                class = "panel-body",
+                style = "padding: 10px 12px;",
+                tags$div(
+                  style = "display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;",
+                  actionButton("mtg_refresh", "🔄 从数据库刷新", class = "btn btn-primary", style = "margin: 0;"),
+                  tags$button(
+                    type = "button",
+                    id = "mtg_filter_combine_btn",
+                    class = "btn btn-default",
+                    style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
+                    `data-mode` = "and",
+                    "且条件"
+                  )
+                ),
+                dateInput("mtg_filter_date_start", "开始日期", value = st, width = "100%"),
+                dateInput("mtg_filter_date_end", "结束日期", value = ed, width = "100%"),
+                uiOutput("meeting_filter_controls")
+              )
+            )
+          )
+        ),
+        tags$div(
+          class = "gantt-main-wrap",
+          tabsetPanel(
+            id = "meeting_sub_tabs",
+            type = "tabs",
+            tabPanel("历史会议", value = "mtg_history", uiOutput("meeting_history_ui")),
+            tabPanel("新建会议", value = "mtg_new", uiOutput("meeting_new_ui"))
+          )
+        )
+      )
+    )
+  })
+
+  output$meeting_filter_controls <- renderUI({
+    opts <- meeting_filter_options()
+    if (is.null(opts)) {
+      return(tags$p(style = "color: #888; font-size: 13px; margin-top: 8px;", "筛选选项加载中…"))
+    }
+    tagList(
+      selectInput("mtg_filter_name", "会议名称", choices = opts$meeting_names, multiple = TRUE, selectize = TRUE, width = "100%"),
+      selectInput("mtg_filter_project", "决策项目", choices = opts$projects, multiple = TRUE, selectize = TRUE, width = "100%"),
+      selectInput("mtg_filter_executor", "执行人", choices = opts$executors, multiple = TRUE, selectize = TRUE, width = "100%")
+    )
+  })
+
+  # ---------- 历史会议 UI ----------
+  output$meeting_history_ui <- renderUI({
+    meeting_data() # 依赖
+    auth <- current_user_auth()
+    if (is.null(auth) || auth$allow_none) return(tags$div(class = "alert alert-warning", "请先登录"))
+
+    df <- meeting_data()
+    if (nrow(df) == 0) {
+      return(tags$div(style = "padding: 40px; text-align: center; color: #888;",
+        tags$h4("暂无会议决策记录"),
+        tags$p("点击「新建会议」标签创建第一个会议决策。")))
+    }
+
+    # 按 (会议名称, 会议时间) 分组
+    df$group_key <- paste0(df[["会议名称"]], "||", format(df[["会议时间"]], "%Y-%m-%d %H:%M"))
+    groups <- split(df, df$group_key)
+
+    panel_list <- lapply(names(groups), function(gk) {
+      gdf <- groups[[gk]]
+      mtg_name <- gdf[["会议名称"]][1]
+      mtg_time <- gdf[["会议时间"]][1]
+      if (is.na(mtg_time)) mtg_time_str <- "时间未定" else mtg_time_str <- format(mtg_time, "%Y-%m-%d %H:%M")
+
+      # 按项目分组（名称顺序即展示顺序）
+      proj_groups <- split(gdf, ifelse(is.na(gdf[["项目名称"]]), "(未关联项目)", gdf[["项目名称"]]))
+      proj_names_ordered <- names(proj_groups)
+      proj_n_counter <- 0L
+      proj_sections <- vector("list", length(proj_names_ordered))
+      for (j in seq_along(proj_names_ordered)) {
+        pname <- proj_names_ordered[j]
+        pdf <- proj_groups[[pname]]
+        is_common <- identical(pname, "共性决策")
+        proj_header <- if (is_common) pname else {
+          proj_n_counter <- proj_n_counter + 1L
+          paste0("项目", proj_n_counter, " ", pname)
+        }
+
+        decision_items <- lapply(seq_len(nrow(pdf)), function(ri) {
+          row <- pdf[ri, ]
+          dec_id <- row$id
+          dec_content <- if (is.na(row[["决策内容"]])) "" else as.character(row[["决策内容"]])
+          executor_json <- as.character(row[["决策执行人及执行确认"]])
+          exec_df <- parse_executor_json(executor_json)
+
+          exec_block <- NULL
+          if (nrow(exec_df) > 0) {
+            exec_cells <- vector("list", nrow(exec_df))
+            for (ei in seq_len(nrow(exec_df))) {
+              ek <- exec_df$key[ei]
+              es <- trimws(as.character(exec_df$状态[ei] %||% ""))
+              en <- trimws(as.character(exec_df$说明[ei] %||% "")[1])
+              dname <- executor_display_name_from_key(ek)
+              is_done <- identical(es, "已执行")
+              is_pending <- identical(es, "未执行")
+              status_txt <- if (is_done) "已执行" else if (is_pending) "未执行" else es
+              status_class <- if (is_done) "executor-status-done" else if (is_pending) "executor-status-pending" else ""
+              title_text <- paste0(dname, "-", status_txt, "-", if (nzchar(en)) en else "")
+              is_current_user <- grepl(paste0("-", auth$work_id, "$"), ek)
+
+              esc_name <- htmltools::htmlEscape(dname)
+              esc_st <- htmltools::htmlEscape(status_txt)
+              esc_note <- htmltools::htmlEscape(en)
+              status_inner <- if (nzchar(status_class)) {
+                sprintf("<span class=\"%s\">%s</span>", status_class, esc_st)
+              } else {
+                sprintf("<span style=\"color:#616161;\">%s</span>", esc_st)
+              }
+              note_inner <- if (nzchar(esc_note)) {
+                sprintf("<span style=\"color:#555;\">%s</span>", esc_note)
+              } else {
+                "<span style=\"color:#bbb;\"></span>"
+              }
+              lab_html <- paste0(
+                "<span style=\"color:#333;\">", esc_name, "</span>",
+                "<span style=\"color:#616161;\">-</span>",
+                status_inner,
+                "<span style=\"color:#616161;\">-</span>",
+                note_inner
+              )
+
+              person_unit <- if (is_current_user) {
+                actionLink(
+                  paste0("exec_status_", dec_id),
+                  label = HTML(lab_html),
+                  class = "meeting-exec-actionlink",
+                  style = "font-size: 13px; cursor: pointer; text-decoration: none; white-space: normal;",
+                  title = title_text
+                )
+              } else {
+                tags$span(
+                  style = "font-size: 13px; cursor: default; line-height: 1.45; display: block;",
+                  title = title_text,
+                  tags$span(style = "color:#333;", dname),
+                  tags$span(style = "color:#616161;", "-"),
+                  if (nzchar(status_class)) {
+                    tags$span(class = status_class, status_txt)
+                  } else {
+                    tags$span(style = "color:#616161;", status_txt)
+                  },
+                  tags$span(style = "color:#616161;", "-"),
+                  if (nzchar(en)) tags$span(style = "color:#555;", en)
+                )
+              }
+              exec_cells[[ei]] <- tags$div(class = "meeting-exec-cell", person_unit)
+            }
+            exec_block <- tags$div(
+              class = "meeting-exec-wrap",
+              tags$span(style = "font-weight: 600; color: #424242;", "执行人："),
+              tags$div(class = "meeting-exec-grid", exec_cells)
+            )
+          }
+
+          tags$div(
+            class = "meeting-decision-item",
+            tags$div(
+              style = "font-size: 14px; line-height: 1.5; color: #333;",
+              tags$span(style = "font-weight: 600; color: #424242;", paste0("决策内容", ri, "：")),
+              tags$span(dec_content)
+            ),
+            exec_block
+          )
+        })
+
+        proj_sections[[j]] <- tags$div(
+          class = "meeting-project-group",
+          tags$div(style = "font-weight: bold; color: #1565C0; margin-bottom: 6px;", proj_header),
+          decision_items
+        )
+      }
+
+      # 查找该组最早的 id 用于编辑按钮
+      first_id <- min(gdf$id)
+
+      tags$div(class = "meeting-panel",
+        tags$div(class = "meeting-panel-heading",
+          tags$span(paste0(mtg_name, "（", mtg_time_str, "）")),
+          actionButton(paste0("btn_edit_mtg_", first_id), "编辑", class = "btn btn-sm btn-default", style = "margin-left: 12px;")
+        ),
+        tags$div(class = "meeting-panel-body", proj_sections)
+      )
+    })
+
+    panel_list
+  })
+
+  # ---------- 新建会议：表单快照（避免 renderUI 重建清空已填内容）----------
+  meeting_new_capture_inputs <- function() {
+    n_proj <- meeting_new_proj_count()
+    dc_list <- meeting_new_dec_counts()
+    name <- trimws(as.character(input$mtg_new_name %||% "")[1])
+    time <- trimws(as.character(input$mtg_new_time %||% "")[1])
+    projs <- vector("list", n_proj)
+    for (pi in seq_len(n_proj)) {
+      dcn <- if (pi <= length(dc_list)) as.integer(dc_list[[pi]]) else 1L
+      if (is.na(dcn) || dcn < 1L) dcn <- 1L
+      pv <- input[[paste0("mtg_proj_", pi)]]
+      proj_one <- if (is.null(pv) || length(pv) == 0L) {
+        character(0)
+      } else {
+        v <- as.character(pv)[1]
+        if (is.na(v) || !nzchar(v)) character(0) else v
+      }
+      contents <- character(dcn)
+      execs <- vector("list", dcn)
+      for (di in seq_len(dcn)) {
+        contents[di] <- as.character(input[[paste0("mtg_dec_", pi, "_", di, "_content")]] %||% "")[1]
+        ex <- input[[paste0("mtg_dec_", pi, "_", di, "_exec")]]
+        execs[[di]] <- if (is.null(ex)) character(0) else as.character(ex)
+      }
+      projs[[pi]] <- list(proj = proj_one, contents = contents, execs = execs)
+    }
+    list(name = name, time = time, projects = projs)
+  }
+
+  .remove_meeting_decision_row <- function(pi, di_remove) {
+    st <- meeting_new_capture_inputs()
+    dc <- meeting_new_dec_counts()
+    dcn <- if (pi <= length(dc)) as.integer(dc[[pi]]) else 1L
+    if (is.na(dcn) || dcn < 1L) dcn <- 1L
+    if (dcn <= 1L) {
+      showNotification("每组至少保留一条决策", type = "message")
+      return()
+    }
+    if (di_remove < 1L || di_remove > dcn) return()
+    pr <- st$projects[[pi]]
+    pr$contents <- pr$contents[-di_remove]
+    pr$execs <- pr$execs[-di_remove]
+    st$projects[[pi]] <- pr
+    dc[[pi]] <- dcn - 1L
+    meeting_new_form_state(st)
+    meeting_new_dec_counts(dc)
+  }
+
+  .add_decision_row <- function(pi) {
+    st <- meeting_new_capture_inputs()
+    dc <- meeting_new_dec_counts()
+    cur <- if (pi <= length(dc)) as.integer(dc[[pi]]) else 1L
+    if (is.na(cur) || cur < 1L) cur <- 1L
+    if (cur >= 20) {
+      showNotification("每组最多20条决策", type = "warning")
+      return()
+    }
+    pr <- st$projects[[pi]]
+    pr$contents <- c(pr$contents, "")
+    pr$execs <- c(pr$execs, list(character(0)))
+    st$projects[[pi]] <- pr
+    dc[[pi]] <- cur + 1L
+    meeting_new_form_state(st)
+    meeting_new_dec_counts(dc)
+  }
+
+  # ---------- 新建会议 UI ----------
+  output$meeting_new_ui <- renderUI({
+    auth <- current_user_auth()
+    if (is.null(auth) || auth$allow_none) return(tags$div(class = "alert alert-warning", "请先登录"))
+
+    frm <- meeting_new_form_state()
+    n_proj <- meeting_new_proj_count()
+    dec_counts <- meeting_new_dec_counts()
+
+    name_val <- if (is.null(frm)) "" else as.character(frm$name %||% "")[1]
+    time_val <- if (is.null(frm)) {
+      format(Sys.time(), "%Y-%m-%d %H:%M")
+    } else {
+      tv <- as.character(frm$time %||% "")[1]
+      if (!nzchar(tv)) format(Sys.time(), "%Y-%m-%d %H:%M") else tv
+    }
+
+    # 获取当前用户可见的项目列表 + "共性决策" 选项
+    project_choices <- c("共性决策" = "__common__")
+    tryCatch({
+      and_auth <- if (auth$allow_all) "" else paste0(' AND id IN (', auth$allowed_subquery, ')')
+      pq <- paste0('SELECT id, "项目名称" FROM public."04项目总表" WHERE "项目名称" IS NOT NULL', and_auth, ' ORDER BY "项目名称"')
+      pdf <- DBI::dbGetQuery(pg_con, pq)
+      if (nrow(pdf) > 0) project_choices <- c(project_choices, setNames(as.character(pdf$id), pdf[["项目名称"]]))
+    }, error = function(e) {})
+
+    # 获取所有在职人员列表（用于执行人选择）
+    all_persons <- character(0)
+    tryCatch({
+      ap <- DBI::dbGetQuery(pg_con, 'SELECT id, "姓名", "工号" FROM public."05人员表" WHERE "人员状态" = \'在职\' ORDER BY "姓名"')
+      if (nrow(ap) > 0) all_persons <- setNames(as.character(ap$id), paste0(ap[["姓名"]], "-", ap[["工号"]]))
+    }, error = function(e) {})
+
+    # 项目组
+    proj_groups <- lapply(seq_len(n_proj), function(pi) {
+      dc <- if (pi <= length(dec_counts)) dec_counts[[pi]] else 1
+      dc <- max(1L, as.integer(dc))
+      proj_input_id <- paste0("mtg_proj_", pi)
+      pr <- if (!is.null(frm) && pi <= length(frm$projects)) frm$projects[[pi]] else NULL
+      proj_sel <- NULL
+      if (!is.null(pr)) {
+        po <- pr$proj
+        if (length(po) && nzchar(as.character(po[1]))) proj_sel <- as.character(po)[1]
+      }
+
+      # 决策行
+      dec_rows <- lapply(seq_len(dc), function(di) {
+        content_id <- paste0("mtg_dec_", pi, "_", di, "_content")
+        exec_id <- paste0("mtg_dec_", pi, "_", di, "_exec")
+        content_val <- ""
+        exec_sel <- NULL
+        if (!is.null(pr)) {
+          if (di <= length(pr$contents)) content_val <- as.character(pr$contents[di]) %||% ""
+          if (di <= length(pr$execs)) {
+            ex <- pr$execs[[di]]
+            if (length(ex)) exec_sel <- as.character(ex)
+          }
+        }
+
+        tags$div(
+          style = "display: flex; align-items: flex-start; margin-bottom: 8px; padding: 8px; background: #fafafa; border-radius: 4px; width: 100%; box-sizing: border-box;",
+          tags$div(style = "flex: 1; margin-right: 8px; min-width: 0;",
+            textInput(content_id, "决策内容", value = content_val, width = "100%", placeholder = "输入决策内容...")
+          ),
+          tags$div(style = "width: 300px; max-width: 40%; flex-shrink: 0;",
+            selectizeInput(exec_id, "执行人",
+              choices = all_persons, selected = exec_sel, multiple = TRUE, width = "100%",
+              options = list(
+                placeholder = "选择执行人…",
+                plugins = list("remove_button")
+              ))
+          ),
+          if (dc > 1) {
+            actionButton(paste0("mtg_del_dec_", pi, "_", di), "删行", class = "btn-del-row", title = "删除此条决策")
+          } else {
+            NULL
+          }
+        )
+      })
+
+      tagList(
+        tags$div(style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 14px; background: #fff;",
+          tags$div(style = "font-weight: bold; margin-bottom: 8px; color: #1565C0;",
+            paste0("决策项目 ", pi)
+          ),
+          selectizeInput(proj_input_id, "选择项目",
+            choices = project_choices, selected = proj_sel,
+            width = "100%", options = list(placeholder = "选择项目...")),
+          dec_rows,
+          actionButton(paste0("mtg_add_dec_", pi), "+ 添加决策", class = "btn btn-sm btn-success", style = "width: auto; min-width: 90px;")
+        )
+      )
+    })
+
+    tagList(
+      tags$div(style = "max-width: 900px; margin: 0 auto; padding: 20px;",
+        tags$h3("新建会议决策", style = "margin-top: 0;"),
+        tags$div(style = "display: flex; gap: 16px; margin-bottom: 12px;",
+          tags$div(style = "flex: 1;",
+            textInput("mtg_new_name", "会议名称", value = name_val, width = "100%", placeholder = "输入会议名称...")
+          ),
+          tags$div(style = "width: 200px;",
+            textInput("mtg_new_time", "会议时间",
+              value = time_val, width = "100%",
+              placeholder = "YYYY-MM-DD HH:MM")
+          )
+        ),
+        tags$hr(),
+        proj_groups,
+        tags$div(style = "margin: 16px 0; display: flex; gap: 12px;",
+          actionButton("mtg_add_proj", "+ 添加决策项目", class = "btn btn-sm btn-default", style = "min-width: 120px;"),
+          actionButton("btn_save_new_meeting", "保存会议", class = "btn btn-sm btn-primary", style = "min-width: 120px;")
+        )
+      )
+    )
+  })
+
+  # ==================== 会议决策 observeEvent ====================
+
+  # 刷新
+  observeEvent(input$mtg_refresh, {
+    meeting_force_refresh(meeting_force_refresh() + 1L)
+  })
+
+  # 新增项目组（先快照当前表单再改结构，避免 renderUI 清空已填内容）
+  observeEvent(input$mtg_add_proj, {
+    n <- meeting_new_proj_count()
+    if (n >= 10) {
+      showNotification("最多支持10个决策项目组", type = "warning")
+      return()
+    }
+    st <- meeting_new_capture_inputs()
+    st$projects[[n + 1L]] <- list(proj = character(0), contents = c(""), execs = list(character(0)))
+    dc <- meeting_new_dec_counts()
+    dc[[n + 1L]] <- 1L
+    meeting_new_form_state(st)
+    meeting_new_proj_count(n + 1L)
+    meeting_new_dec_counts(dc)
+  })
+
+  # 新增决策行（动态按钮）
+  observeEvent(input$mtg_add_dec_1, { .add_decision_row(1) })
+  observeEvent(input$mtg_add_dec_2, { .add_decision_row(2) })
+  observeEvent(input$mtg_add_dec_3, { .add_decision_row(3) })
+  observeEvent(input$mtg_add_dec_4, { .add_decision_row(4) })
+  observeEvent(input$mtg_add_dec_5, { .add_decision_row(5) })
+  observeEvent(input$mtg_add_dec_6, { .add_decision_row(6) })
+  observeEvent(input$mtg_add_dec_7, { .add_decision_row(7) })
+  observeEvent(input$mtg_add_dec_8, { .add_decision_row(8) })
+  observeEvent(input$mtg_add_dec_9, { .add_decision_row(9) })
+  observeEvent(input$mtg_add_dec_10, { .add_decision_row(10) })
+
+  # 删除决策行（原仅有按钮未绑定 observe，故点击无效）
+  for (pi in seq_len(10)) {
+    for (di in seq_len(20)) {
+      local({
+        p <- pi
+        d <- di
+        bid <- paste0("mtg_del_dec_", p, "_", d)
+        observeEvent(input[[bid]], {
+          req(is.numeric(input[[bid]]) && input[[bid]] > 0)
+          .remove_meeting_decision_row(p, d)
+        }, ignoreInit = TRUE)
+      })
+    }
+  }
+
+  # 保存新会议
+  observeEvent(input$btn_save_new_meeting, {
+    auth <- current_user_auth()
+    req(!auth$allow_none)
+
+    mtg_name <- trimws(input$mtg_new_name %||% "")
+    mtg_time_str <- trimws(input$mtg_new_time %||% "")
+    if (!nzchar(mtg_name)) {
+      showNotification("请填写会议名称", type = "warning")
+      return()
+    }
+    mtg_time <- tryCatch(as.POSIXct(mtg_time_str), error = function(e) NULL)
+    if (is.null(mtg_time)) {
+      showNotification("会议时间格式错误，请使用 YYYY-MM-DD HH:MM", type = "warning")
+      return()
+    }
+
+    n_proj <- meeting_new_proj_count()
+    dec_counts <- meeting_new_dec_counts()
+
+    # 收集所有决策
+    decisions <- list()
+    for (pi in seq_len(n_proj)) {
+      proj_id <- input[[paste0("mtg_proj_", pi)]]
+      if (is.null(proj_id) || !nzchar(proj_id)) next
+      # "共性决策" 用 NA 表示不关联项目
+      is_common <- (proj_id == "__common__")
+      actual_proj_id <- if (is_common) NA_integer_ else as.integer(proj_id)
+      dc <- if (pi <= length(dec_counts)) dec_counts[[pi]] else 1
+      for (di in seq_len(dc)) {
+        content <- trimws(input[[paste0("mtg_dec_", pi, "_", di, "_content")]] %||% "")
+        if (!nzchar(content)) next
+        exec_ids <- input[[paste0("mtg_dec_", pi, "_", di, "_exec")]]
+        exec_json <- build_executor_json(pg_con, exec_ids)
+        decisions <- c(decisions, list(list(
+          project_id = actual_proj_id,
+          content = content,
+          executor_json = exec_json
+        )))
+      }
+    }
+
+    if (length(decisions) == 0) {
+      showNotification("请至少添加一条决策内容", type = "warning")
+      return()
+    }
+
+    tryCatch({
+      for (d in decisions) {
+        new_id <- meeting_next_id(pg_con)
+        q <- 'INSERT INTO public."10会议决策表" ("id", "会议名称", "会议时间", "04项目总表_id", "决策内容", "决策执行人及执行确认", "created_by", "updated_by") VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8)'
+        DBI::dbExecute(pg_con, q, params = list(
+          new_id, mtg_name, mtg_time, d$project_id, d$content,
+          d$executor_json, auth$work_id, auth$work_id))
+
+        insert_audit_log(pg_con, auth$work_id, auth$name,
+          "INSERT", "10会议决策表", new_id,
+          sprintf("新增会议决策[%s]: %s", mtg_name, substr(d$content, 1, 50)),
+          sprintf("新增决策 id=%d", new_id),
+          NULL, list(会议名称 = mtg_name, 决策内容 = d$content), NULL)
+      }
+
+      showNotification(sprintf("会议[%s]保存成功！共%d条决策", mtg_name, length(decisions)), type = "message")
+      # 重置表单
+      meeting_new_form_state(NULL)
+      meeting_new_proj_count(1)
+      meeting_new_dec_counts(list(1))
+      meeting_force_refresh(meeting_force_refresh() + 1L)
+    }, error = function(e) {
+      showNotification(paste("保存失败:", e$message), type = "error")
+    })
+  })
+
+  # 点击执行人状态 -> 弹出修改模态框
+  # 动态注册（最多500个决策）
+  for (di in seq_len(500)) {
+    local({
+      ddi <- di
+      observeEvent(input[[paste0("exec_status_", ddi)]], {
+        if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return
+        tryCatch({
+          row <- DBI::dbGetQuery(pg_con,
+            'SELECT id, "决策内容", "决策执行人及执行确认"::text AS "决策执行人及执行确认" FROM public."10会议决策表" WHERE id = $1',
+            params = list(ddi))
+          if (nrow(row) == 0) return
+          executor_modal_ctx(list(decision_id = ddi, content = row[["决策内容"]][1], executor_json = as.character(row[["决策执行人及执行确认"]][1])))
+        }, error = function(e) {})
+      }, ignoreInit = TRUE)
+    })
+  }
+
+  # 执行状态修改模态框
+  observeEvent(executor_modal_ctx(), {
+    ctx <- executor_modal_ctx()
+    if (is.null(ctx)) return
+    auth <- current_user_auth()
+    if (auth$allow_none) return
+
+    exec_df <- parse_executor_json(ctx$executor_json)
+    # 找到当前用户
+    my_row <- exec_df[grepl(paste0("-", auth$work_id, "$"), exec_df$key), , drop = FALSE]
+    if (nrow(my_row) == 0) return
+
+    my_key <- my_row$key[1]
+    my_status <- my_row$状态[1]
+    my_note <- my_row$说明[1]
+
+    showModal(modalDialog(
+      title = "更新执行状态",
+      tags$div(
+        tags$p(strong("决策内容: "), ctx$content),
+        tags$hr(),
+        tags$p(strong("执行人: "), executor_display_name_from_key(my_key)),
+        radioButtons("executor_new_status", "执行状态",
+          choices = c("未执行", "已执行"),
+          selected = my_status, inline = TRUE),
+        textInput("executor_new_note", "说明", value = my_note, width = "100%", placeholder = "填写执行说明...")
+      ),
+      footer = tagList(
+        actionButton("btn_save_executor_status", "保存", class = "btn btn-sm btn-primary", style = "min-width: 80px;"),
+        modalButton("取消")
+      ),
+      easyClose = TRUE
+    ))
+  })
+
+  # 保存执行状态
+  observeEvent(input$btn_save_executor_status, {
+    auth <- current_user_auth()
+    req(!auth$allow_none)
+    ctx <- executor_modal_ctx()
+    if (is.null(ctx)) return
+
+    tryCatch({
+      row <- DBI::dbGetQuery(pg_con,
+        'SELECT "决策执行人及执行确认"::text AS "决策执行人及执行确认" FROM public."10会议决策表" WHERE id = $1',
+        params = list(ctx$decision_id))
+      if (nrow(row) == 0) return
+
+      old_json <- as.character(row[["决策执行人及执行确认"]][1])
+      exec_list <- jsonlite::fromJSON(old_json, simplifyVector = FALSE)
+
+      # 找到当前用户的key
+      my_key <- NULL
+      for (k in names(exec_list)) {
+        if (grepl(paste0("-", auth$work_id, "$"), k)) { my_key <- k; break }
+      }
+      if (is.null(my_key)) return
+
+      old_status <- exec_list[[my_key]][["状态"]] %||% "未执行"
+      old_note <- exec_list[[my_key]][["说明"]] %||% ""
+
+      exec_list[[my_key]][["状态"]] <- input$executor_new_status
+      exec_list[[my_key]][["说明"]] <- trimws(input$executor_new_note %||% "")
+      new_json <- jsonlite::toJSON(exec_list, auto_unbox = TRUE)
+
+      DBI::dbExecute(pg_con,
+        'UPDATE public."10会议决策表" SET "决策执行人及执行确认" = $1::json, "updated_by" = $2 WHERE id = $3',
+        params = list(as.character(new_json), auth$work_id, ctx$decision_id))
+
+      insert_audit_log(pg_con, auth$work_id, auth$name,
+        "UPDATE", "10会议决策表", ctx$decision_id,
+        sprintf("更新执行状态[%s]: %s -> %s", my_key, old_status, input$executor_new_status),
+        sprintf("执行状态变更: %s", my_key),
+        list(状态 = old_status, 说明 = old_note),
+        list(状态 = input$executor_new_status, 说明 = trimws(input$executor_new_note %||% "")),
+        NULL)
+
+      removeModal()
+      showNotification("执行状态已更新", type = "message")
+      meeting_force_refresh(meeting_force_refresh() + 1L)
+      executor_modal_ctx(NULL)
+    }, error = function(e) {
+      showNotification(paste("更新失败:", e$message), type = "error")
+    })
+  })
+
+  # 编辑会议（弹出模态框）
+  observeEvent(input$btn_edit_mtg_1, { .show_edit_meeting_modal(1) })
+  observeEvent(input$btn_edit_mtg_2, { .show_edit_meeting_modal(2) })
+  observeEvent(input$btn_edit_mtg_3, { .show_edit_meeting_modal(3) })
+  observeEvent(input$btn_edit_mtg_4, { .show_edit_meeting_modal(4) })
+  observeEvent(input$btn_edit_mtg_5, { .show_edit_meeting_modal(5) })
+  # 动态处理大于5的编辑按钮
+  for (ei in 6:500) {
+    local({
+      eei <- ei
+      observeEvent(input[[paste0("btn_edit_mtg_", eei)]], {
+        .show_edit_meeting_modal(eei)
+      }, ignoreInit = TRUE)
+    })
+  }
+
+  .show_edit_meeting_modal <- function(first_id) {
+    if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return
+    auth <- current_user_auth()
+    if (auth$allow_none) return
+
+    tryCatch({
+      # 获取同一场会议的所有决策行
+      target <- DBI::dbGetQuery(pg_con,
+        'SELECT id, "会议名称", "会议时间" FROM public."10会议决策表" WHERE id = $1',
+        params = list(first_id))
+      if (nrow(target) == 0) return
+      mtg_name <- target[["会议名称"]][1]
+      mtg_time <- target[["会议时间"]][1]
+
+      all_rows <- DBI::dbGetQuery(pg_con,
+        'SELECT t.id, t."04项目总表_id", t."决策内容", t."决策执行人及执行确认", g."项目名称" FROM public."10会议决策表" t LEFT JOIN public."04项目总表" g ON t."04项目总表_id" = g.id WHERE t."会议名称" = $1 AND t."会议时间" = $2 ORDER BY t.id',
+        params = list(mtg_name, mtg_time))
+
+      # 获取项目选项 + "共性决策"
+      project_choices <- c("共性决策" = "__common__")
+      and_auth <- if (auth$allow_all) "" else paste0(' AND id IN (', auth$allowed_subquery, ')')
+      pq <- paste0('SELECT id, "项目名称" FROM public."04项目总表" WHERE "项目名称" IS NOT NULL', and_auth, ' ORDER BY "项目名称"')
+      pdf <- DBI::dbGetQuery(pg_con, pq)
+      if (nrow(pdf) > 0) project_choices <- c(project_choices, setNames(as.character(pdf$id), pdf[["项目名称"]]))
+
+      # 构建编辑表单
+      decision_forms <- lapply(seq_len(nrow(all_rows)), function(ri) {
+        row <- all_rows[ri, ]
+        # 如果 04项目总表_id 为 NULL，选中"共性决策"
+        sel_val <- if (is.na(row[["04项目总表_id"]])) "__common__" else as.character(row[["04项目总表_id"]])
+        tagList(
+          tags$div(style = "border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin-bottom: 8px;",
+            tags$div(style = "font-weight: bold; color: #666; font-size: 12px;", paste0("决策 #", row$id)),
+            selectizeInput(paste0("edit_mtg_proj_", row$id), "项目",
+              choices = project_choices,
+              selected = sel_val,
+              width = "100%", options = list(placeholder = "选择项目...")),
+            textInput(paste0("edit_mtg_content_", row$id), "决策内容",
+              value = if (is.na(row[["决策内容"]])) "" else row[["决策内容"]], width = "100%")
+          )
+        )
+      })
+
+      meeting_edit_ctx(list(
+        first_id = first_id,
+        mtg_name = mtg_name,
+        mtg_time = mtg_time,
+        row_ids = all_rows$id,
+        original_data = all_rows
+      ))
+
+      showModal(modalDialog(
+        title = "编辑会议决策",
+        size = "l", easyClose = TRUE,
+        tags$div(style = "display: flex; gap: 16px;",
+          tags$div(style = "flex: 1;",
+            textInput("edit_mtg_name", "会议名称", value = mtg_name, width = "100%")
+          ),
+          tags$div(style = "width: 200px;",
+            textInput("edit_mtg_time", "会议时间",
+              value = if (is.na(mtg_time)) "" else format(mtg_time, "%Y-%m-%d %H:%M"), width = "100%")
+          )
+        ),
+        tags$hr(),
+        decision_forms,
+        footer = tagList(
+          actionButton("btn_save_mtg_edit", "保存修改", class = "btn btn-sm btn-primary", style = "min-width: 100px;"),
+          modalButton("取消")
+        )
+      ))
+    }, error = function(e) {
+      showNotification(paste("加载会议数据失败:", e$message), type = "error")
+    })
+  }
+
+  # 保存编辑后的会议
+  observeEvent(input$btn_save_mtg_edit, {
+    auth <- current_user_auth()
+    req(!auth$allow_none)
+    ctx <- meeting_edit_ctx()
+    if (is.null(ctx)) return
+
+    new_name <- trimws(input$edit_mtg_name %||% "")
+    new_time_str <- trimws(input$edit_mtg_time %||% "")
+    if (!nzchar(new_name)) {
+      showNotification("会议名称不能为空", type = "warning")
+      return
+    }
+    new_time <- tryCatch(as.POSIXct(new_time_str), error = function(e) NULL)
+    if (is.null(new_time)) {
+      showNotification("时间格式错误", type = "warning")
+      return
+    }
+
+    tryCatch({
+      for (rid in ctx$row_ids) {
+        new_proj <- input[[paste0("edit_mtg_proj_", rid)]]
+        new_content <- trimws(input[[paste0("edit_mtg_content_", rid)]] %||% "")
+
+        # 获取原始数据做对比
+        orig_row <- ctx$original_data[ctx$original_data$id == rid, ]
+
+        changes <- list()
+        # 会议名称变更
+        if (new_name != ctx$mtg_name) changes <- c(changes, sprintf("会议名称: [%s]->[%s]", ctx$mtg_name, new_name))
+        # 会议时间变更
+        if (!identical(new_time, ctx$mtg_time)) changes <- c(changes, "会议时间已变更")
+        # 项目变更
+        orig_proj <- if (is.na(orig_row[["04项目总表_id"]])) "__common__" else as.character(orig_row[["04项目总表_id"]])
+        if ((new_proj %||% "") != orig_proj) changes <- c(changes, sprintf("项目id: [%s]->[%s]", orig_proj, new_proj %||% ""))
+        # 内容变更
+        orig_content <- if (is.na(orig_row[["决策内容"]])) "" else orig_row[["决策内容"]]
+        if (new_content != orig_content) changes <- c(changes, sprintf("内容: [%s]->[%s]", substr(orig_content, 1, 30), substr(new_content, 1, 30)))
+
+        DBI::dbExecute(pg_con,
+          'UPDATE public."10会议决策表" SET "会议名称" = $1, "会议时间" = $2, "04项目总表_id" = $3, "决策内容" = $4, "updated_by" = $5 WHERE id = $6',
+          params = list(new_name, new_time,
+            if (is.null(new_proj) || !nzchar(new_proj) || new_proj == "__common__") NA_integer_ else as.integer(new_proj),
+            new_content, auth$work_id, rid))
+
+        if (length(changes) > 0) {
+          insert_audit_log(pg_con, auth$work_id, auth$name,
+            "UPDATE", "10会议决策表", rid,
+            sprintf("编辑会议决策[%s]: %s", new_name, paste(changes, collapse = "; ")),
+            sprintf("编辑决策 id=%d", rid),
+            list(会议名称 = ctx$mtg_name), list(会议名称 = new_name), NULL)
+        }
+      }
+
+      removeModal()
+      showNotification("会议修改已保存", type = "message")
+      meeting_force_refresh(meeting_force_refresh() + 1L)
+      meeting_edit_ctx(NULL)
+    }, error = function(e) {
+      showNotification(paste("保存失败:", e$message), type = "error")
+    })
   })
 }
 

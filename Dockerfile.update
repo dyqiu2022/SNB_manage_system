@@ -1,0 +1,3 @@
+FROM ivd_shiny:20260305
+COPY app.R /app/app.R
+CMD ["R", "-e", "shiny::runApp('/app/app.R', host = '0.0.0.0', port = 3838)"]

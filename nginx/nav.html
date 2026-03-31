@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snibe临床 - 系统导航</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #333;
+  }
+  .container {
+    text-align: center;
+    padding: 20px;
+  }
+  h1 {
+    color: #fff;
+    font-size: 2em;
+    margin-bottom: 10px;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  }
+  .subtitle {
+    color: rgba(255,255,255,0.85);
+    font-size: 1em;
+    margin-bottom: 40px;
+  }
+  .cards {
+    display: flex;
+    gap: 30px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    padding: 40px 30px;
+    width: 280px;
+    text-decoration: none;
+    color: #333;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+  }
+  .card-icon {
+    font-size: 3em;
+    margin-bottom: 15px;
+  }
+  .card h2 {
+    font-size: 1.3em;
+    margin-bottom: 10px;
+    color: #444;
+  }
+  .card p {
+    font-size: 0.9em;
+    color: #888;
+    line-height: 1.5;
+  }
+  .footer {
+    margin-top: 40px;
+    color: rgba(255,255,255,0.6);
+    font-size: 0.8em;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Snibe 临床项目管理系统</h1>
+  <p class="subtitle">请选择要进入的子系统</p>
+  <div class="cards">
+    <a href="/gantt/" class="card">
+      <div class="card-icon">&#128197;</div>
+      <h2>甘特图项目管理</h2>
+      <p>项目进度看板、阶段管理、甘特图可视化</p>
+    </a>
+    <a href="/maintain/" class="card">
+      <div class="card-icon">&#128451;</div>
+      <h2>数据库信息维护</h2>
+      <p>医院信息、仪器信息、样本资源的增删改维护</p>
+    </a>
+  </div>
+  <p class="footer">Snibe IVD &copy; 2026</p>
+</div>
+</body>
+</html>

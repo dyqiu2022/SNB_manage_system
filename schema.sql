@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict XA16VsSyCbGtjQqA0hUi3DB0g5XVxZVv1yIrEHVZqmSuJbBMbaW1Pco7W6TTzI8
+\restrict unnVYNWeyOfodLjTNdwPv6W3JoTe3J95QZoLo5aecK0fLarciGkz7i7h3xViqZz
 
 -- Dumped from database version 15.15 (Debian 15.15-1.pgdg13+1)
 -- Dumped by pg_dump version 15.15 (Debian 15.15-1.pgdg13+1)
@@ -310,7 +310,9 @@ CREATE TABLE public."01医院信息表" (
     created_by character varying,
     "科室备注" text,
     "HIS与病例资源获取难度" text,
-    "HIS与病例资源说明" text
+    "HIS与病例资源说明" text,
+    "省份" text,
+    "城市" text
 );
 
 
@@ -328,7 +330,8 @@ CREATE TABLE public."02仪器资源表" (
     created_by character varying,
     updated_at timestamp without time zone,
     updated_by character varying,
-    "01医院信息表_id" integer
+    "01医院信息表_id" integer,
+    "05人员表_id" integer
 );
 
 
@@ -343,7 +346,8 @@ CREATE TABLE public."03医院_项目表" (
     created_at1 timestamp without time zone,
     updated_at1 timestamp without time zone,
     updated_by1 character varying,
-    created_by1 character varying
+    created_by1 character varying,
+    milestones_json jsonb
 );
 
 
@@ -357,7 +361,8 @@ CREATE TABLE public."04项目总表" (
     "项目类型" text,
     "05人员表_id" integer,
     "重要紧急程度" text,
-    is_active boolean DEFAULT true
+    is_active boolean DEFAULT true,
+    milestones_json jsonb
 );
 
 
@@ -411,7 +416,8 @@ CREATE TABLE public."06样本资源表" (
     nc_order numeric,
     "样本类型分类" text,
     "样本疾病分类" text,
-    "01医院信息表_id" integer
+    "01医院信息表_id" integer,
+    "05人员表_id" integer
 );
 
 
@@ -535,7 +541,6 @@ CREATE TABLE public."09项目阶段实例表" (
     progress integer DEFAULT 0 NOT NULL,
     remark_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     contributors_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    milestones_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     sample_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     extra_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     row_version integer DEFAULT 1 NOT NULL,
@@ -566,6 +571,45 @@ CREATE SEQUENCE public."09项目阶段实例表_id_seq"
 --
 
 ALTER SEQUENCE public."09项目阶段实例表_id_seq" OWNED BY public."09项目阶段实例表".id;
+
+
+--
+-- Name: 10会议决策表; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public."10会议决策表" (
+    id integer NOT NULL,
+    created_at timestamp without time zone,
+    updated_at timestamp without time zone,
+    created_by character varying,
+    updated_by character varying,
+    nc_order numeric,
+    "会议名称" text,
+    "会议时间" timestamp without time zone,
+    "04项目总表_id" integer,
+    "决策内容" text,
+    "决策执行人及执行确认" json
+);
+
+
+--
+-- Name: 10会议决策表_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public."10会议决策表_id_seq"
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: 10会议决策表_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public."10会议决策表_id_seq" OWNED BY public."10会议决策表".id;
 
 
 --
@@ -2607,15 +2651,20 @@ CREATE VIEW public."v_项目阶段甘特视图" AS
     d.stage_order AS stage_ord,
     d.stage_scope,
     'Process'::text AS task_type,
-    si.planned_start_date AS start_date,
+    si.planned_start_date,
+    si.actual_start_date,
+    COALESCE(si.actual_start_date, si.planned_start_date) AS start_date,
     si.planned_end_date,
     si.actual_end_date,
     ((COALESCE(si.progress, 0))::numeric / 100.0) AS progress,
-    ((si.planned_start_date IS NULL) OR (si.planned_end_date IS NULL)) AS is_unplanned,
+    ((COALESCE(si.actual_start_date, si.planned_start_date) IS NULL) OR (si.planned_end_date IS NULL)) AS is_unplanned,
     (si.remark_json)::text AS remark,
     si.remark_json,
     si.contributors_json,
-    si.milestones_json,
+        CASE
+            WHEN (d.stage_scope = 'sync'::text) THEN p.milestones_json
+            ELSE s.milestones_json
+        END AS milestones_json,
     si.sample_json,
     si.row_version,
     mgr."姓名" AS manager_name
@@ -2626,6 +2675,53 @@ CREATE VIEW public."v_项目阶段甘特视图" AS
      LEFT JOIN public."01医院信息表" h ON ((h.id = s."01_hos_resource_table医院信息表_id")))
      LEFT JOIN public."05人员表" mgr ON ((mgr.id = p."05人员表_id")))
   WHERE (COALESCE(si.is_active, true) = true);
+
+
+--
+-- Name: v_项目阶段甘特视图_全部; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public."v_项目阶段甘特视图_全部" AS
+ SELECT si.id AS stage_instance_id,
+    si.project_id AS project_db_id,
+    COALESCE(NULLIF(p."项目名称", ''::text), ('项目-'::text || (p.id)::text)) AS project_id,
+    p."项目类型" AS project_type,
+    p."重要紧急程度",
+    COALESCE(p.is_active, true) AS project_is_active,
+    si.project_id AS proj_row_id,
+    si.site_project_id AS site_row_id,
+        CASE
+            WHEN (d.stage_scope = 'sync'::text) THEN '所有中心（同步）'::text
+            ELSE COALESCE(NULLIF(h."医院名称", ''::text), ('中心-'::text || (COALESCE(s.id, 0))::text))
+        END AS site_name,
+    d.stage_key AS task_name,
+    d.stage_name AS task_display_name,
+    d.stage_order AS stage_ord,
+    d.stage_scope,
+    'Process'::text AS task_type,
+    si.planned_start_date,
+    si.actual_start_date,
+    COALESCE(si.actual_start_date, si.planned_start_date) AS start_date,
+    si.planned_end_date,
+    si.actual_end_date,
+    ((COALESCE(si.progress, 0))::numeric / 100.0) AS progress,
+    ((COALESCE(si.actual_start_date, si.planned_start_date) IS NULL) OR (si.planned_end_date IS NULL)) AS is_unplanned,
+    (si.remark_json)::text AS remark,
+    si.remark_json,
+    si.contributors_json,
+        CASE
+            WHEN (d.stage_scope = 'sync'::text) THEN p.milestones_json
+            ELSE s.milestones_json
+        END AS milestones_json,
+    si.sample_json,
+    si.row_version,
+    mgr."姓名" AS manager_name
+   FROM (((((public."09项目阶段实例表" si
+     JOIN public."08项目阶段定义表" d ON ((d.id = si.stage_def_id)))
+     JOIN public."04项目总表" p ON ((p.id = si.project_id)))
+     LEFT JOIN public."03医院_项目表" s ON ((s.id = si.site_project_id)))
+     LEFT JOIN public."01医院信息表" h ON ((h.id = s."01_hos_resource_table医院信息表_id")))
+     LEFT JOIN public."05人员表" mgr ON ((mgr.id = p."05人员表_id")));
 
 
 --
@@ -2762,6 +2858,41 @@ ALTER SEQUENCE public."项目总表_id_seq" OWNED BY public."04项目总表".id;
 
 
 --
+-- Name: Table-1; Type: TABLE; Schema: pzm5myopmeqe4jr; Owner: -
+--
+
+CREATE TABLE pzm5myopmeqe4jr."Table-1" (
+    id integer NOT NULL,
+    created_at timestamp without time zone,
+    updated_at timestamp without time zone,
+    created_by character varying,
+    updated_by character varying,
+    nc_order numeric,
+    title text
+);
+
+
+--
+-- Name: Table-1_id_seq; Type: SEQUENCE; Schema: pzm5myopmeqe4jr; Owner: -
+--
+
+CREATE SEQUENCE pzm5myopmeqe4jr."Table-1_id_seq"
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: Table-1_id_seq; Type: SEQUENCE OWNED BY; Schema: pzm5myopmeqe4jr; Owner: -
+--
+
+ALTER SEQUENCE pzm5myopmeqe4jr."Table-1_id_seq" OWNED BY pzm5myopmeqe4jr."Table-1".id;
+
+
+--
 -- Name: Features id; Type: DEFAULT; Schema: pgzgyje645ljgth; Owner: -
 --
 
@@ -2832,6 +2963,13 @@ ALTER TABLE ONLY public."09项目阶段实例表" ALTER COLUMN id SET DEFAULT ne
 
 
 --
+-- Name: 10会议决策表 id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."10会议决策表" ALTER COLUMN id SET DEFAULT nextval('public."10会议决策表_id_seq"'::regclass);
+
+
+--
 -- Name: nc_api_tokens id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2857,6 +2995,13 @@ ALTER TABLE ONLY public.xc_knex_migrationsv0 ALTER COLUMN id SET DEFAULT nextval
 --
 
 ALTER TABLE ONLY public.xc_knex_migrationsv0_lock ALTER COLUMN index SET DEFAULT nextval('public.xc_knex_migrationsv0_lock_index_seq'::regclass);
+
+
+--
+-- Name: Table-1 id; Type: DEFAULT; Schema: pzm5myopmeqe4jr; Owner: -
+--
+
+ALTER TABLE ONLY pzm5myopmeqe4jr."Table-1" ALTER COLUMN id SET DEFAULT nextval('pzm5myopmeqe4jr."Table-1_id_seq"'::regclass);
 
 
 --
@@ -2905,6 +3050,14 @@ ALTER TABLE ONLY public."08项目阶段定义表"
 
 ALTER TABLE ONLY public."09项目阶段实例表"
     ADD CONSTRAINT "09项目阶段实例表_pkey" PRIMARY KEY (id);
+
+
+--
+-- Name: 10会议决策表 10会议决策表_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."10会议决策表"
+    ADD CONSTRAINT "10会议决策表_pkey" PRIMARY KEY (id);
 
 
 --
@@ -3724,6 +3877,14 @@ ALTER TABLE ONLY public."04项目总表"
 
 
 --
+-- Name: Table-1 Table-1_pkey; Type: CONSTRAINT; Schema: pzm5myopmeqe4jr; Owner: -
+--
+
+ALTER TABLE ONLY pzm5myopmeqe4jr."Table-1"
+    ADD CONSTRAINT "Table-1_pkey" PRIMARY KEY (id);
+
+
+--
 -- Name: Features_order_idx; Type: INDEX; Schema: pgzgyje645ljgth; Owner: -
 --
 
@@ -3742,6 +3903,13 @@ CREATE INDEX "06样本资源表_order_idx" ON public."06样本资源表" USING b
 --
 
 CREATE INDEX "07操作审计表_order_idx" ON public."07操作审计表" USING btree (nc_order);
+
+
+--
+-- Name: 10会议决策表_order_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX "10会议决策表_order_idx" ON public."10会议决策表" USING btree (nc_order);
 
 
 --
@@ -3787,6 +3955,13 @@ CREATE INDEX fk_04__05__q8oel2kw9l ON public."_nc_m2m_04项目总表_05人员表
 
 
 --
+-- Name: fk_04__10__b_9mqw4cim; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX fk_04__10__b_9mqw4cim ON public."10会议决策表" USING btree ("04项目总表_id");
+
+
+--
 -- Name: fk_05__01__kkag17q1u6; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3801,10 +3976,24 @@ CREATE INDEX fk_05__01__t2zpmy9atx ON public."_nc_m2m_05人员表_01医院信息
 
 
 --
+-- Name: fk_05__02__irzc_tgydl; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX fk_05__02__irzc_tgydl ON public."02仪器资源表" USING btree ("05人员表_id");
+
+
+--
 -- Name: fk_05__04__4ddbtm2ahr; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX fk_05__04__4ddbtm2ahr ON public."04项目总表" USING btree ("05人员表_id");
+
+
+--
+-- Name: fk_05__06__vr4i9fxndc; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX fk_05__06__vr4i9fxndc ON public."06样本资源表" USING btree ("05人员表_id");
 
 
 --
@@ -5810,6 +5999,13 @@ CREATE INDEX workspace_user_invited_by_index ON public.workspace_user USING btre
 
 
 --
+-- Name: Table-1_order_idx; Type: INDEX; Schema: pzm5myopmeqe4jr; Owner: -
+--
+
+CREATE INDEX "Table-1_order_idx" ON pzm5myopmeqe4jr."Table-1" USING btree (nc_order);
+
+
+--
 -- Name: 09项目阶段实例表 trg_bump_stage_instance_version; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -5903,6 +6099,14 @@ ALTER TABLE ONLY public."_nc_m2m_04项目总表_05人员表"
 
 
 --
+-- Name: 10会议决策表 fk_04__10__wuo_62xa64; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."10会议决策表"
+    ADD CONSTRAINT fk_04__10__wuo_62xa64 FOREIGN KEY ("04项目总表_id") REFERENCES public."04项目总表"(id);
+
+
+--
 -- Name: _nc_m2m_05人员表_01医院信息表 fk_05__01__iddssi0fjb; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5919,11 +6123,27 @@ ALTER TABLE ONLY public."_nc_m2m_05人员表_01医院信息表"
 
 
 --
+-- Name: 02仪器资源表 fk_05__02__lsuv41i1l0; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."02仪器资源表"
+    ADD CONSTRAINT fk_05__02__lsuv41i1l0 FOREIGN KEY ("05人员表_id") REFERENCES public."05人员表"(id);
+
+
+--
 -- Name: 04项目总表 fk_05__04__v43u3z22v8; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public."04项目总表"
     ADD CONSTRAINT fk_05__04__v43u3z22v8 FOREIGN KEY ("05人员表_id") REFERENCES public."05人员表"(id);
+
+
+--
+-- Name: 06样本资源表 fk_05__06__fjxx14db2k; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."06样本资源表"
+    ADD CONSTRAINT fk_05__06__fjxx14db2k FOREIGN KEY ("05人员表_id") REFERENCES public."05人员表"(id);
 
 
 --
@@ -5938,5 +6158,5 @@ ALTER TABLE ONLY public."03医院_项目表"
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XA16VsSyCbGtjQqA0hUi3DB0g5XVxZVv1yIrEHVZqmSuJbBMbaW1Pco7W6TTzI8
+\unrestrict unnVYNWeyOfodLjTNdwPv6W3JoTe3J95QZoLo5aecK0fLarciGkz7i7h3xViqZz
 

@@ -1,0 +1,53 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose:*)",
+      "Bash(docker save:*)",
+      "Read(//mnt/c/IVD_Project/**)",
+      "Bash(cp ivd_maintain_shiny.tar /mnt/c/IVD_Project/)",
+      "Bash(cp docker-compose.yml /mnt/c/IVD_Project/)",
+      "Bash(cp nginx/default.conf /mnt/c/IVD_Project/nginx/)",
+      "Bash(cp nginx/nav.html /mnt/c/IVD_Project/nginx/)",
+      "Bash(docker.exe load:*)",
+      "Bash(docker.exe compose:*)",
+      "Bash(docker.exe ps:*)",
+      "Bash(docker.exe logs:*)",
+      "Bash(curl.exe -s -o /dev/null -w \"%{http_code}\" http://localhost/)",
+      "Bash(curl.exe -s http://localhost/)",
+      "Bash(curl.exe -s -o /dev/null -w \"%{http_code}\" http://localhost/gantt/)",
+      "Bash(curl.exe -s -o /dev/null -w \"%{http_code}\" http://localhost/maintain/)",
+      "Bash(curl.exe -sI http://localhost/gantt/)",
+      "Bash(curl.exe -sI http://localhost/maintain/)",
+      "Bash(curl.exe -s http://localhost/maintain/)",
+      "Bash(curl.exe -s http://localhost/gantt/)",
+      "Bash(curl.exe -sI -b \"\" http://localhost/gantt/)",
+      "Bash(docker.exe exec:*)",
+      "Bash(curl.exe -v --noproxy \"*\" -H \"Cookie:\" http://localhost/gantt/)",
+      "Bash(docker.exe restart:*)",
+      "Bash(curl.exe -v --noproxy \"*\" http://localhost/gantt/)",
+      "Bash(curl.exe -s -o /dev/null -w \"%{http_code} %{redirect_url}\" --noproxy \"*\" http://localhost/maintain/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\" http://localhost/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\" http://localhost/gantt/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\" http://localhost/maintain/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\" http://localhost/login/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\" http://localhost/gantt)",
+      "Bash(curl.exe -sI --noproxy \"*\" http://localhost/gantt/)",
+      "Bash(curl.exe -sI --noproxy \"*\" http://localhost/maintain/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\\\\n\" http://localhost/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code} → %{redirect_url}\\\\n\" http://localhost/gantt/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code} → %{redirect_url}\\\\n\" http://localhost/maintain/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\\\\n\" http://localhost/login/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code} → %{redirect_url}\\\\n\" http://localhost/gantt)",
+      "Bash(curl.exe -s --noproxy \"*\" http://localhost/maintain/)",
+      "Bash(docker.exe stop:*)",
+      "Bash(docker.exe start:*)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\\\\n\" http://localhost/gantt/)",
+      "Bash(curl.exe -s --noproxy \"*\" -o /dev/null -w \"%{http_code}\\\\n\" http://localhost/maintain/)",
+      "Bash(docker.exe images:*)"
+    ],
+    "additionalDirectories": [
+      "/mnt/c/IVD_Project/nginx",
+      "/mnt/c/IVD_Project"
+    ]
+  }
+}

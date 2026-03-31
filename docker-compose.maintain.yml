@@ -1,0 +1,6 @@
+services:
+  maintain-shiny-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.maintain
+    image: ivd_maintain_shiny:20260330

@@ -1,0 +1,7 @@
+# 基于已有的业务 Shiny 镜像（含 R 环境 + 所有包），仅替换应用文件
+FROM ivd_shiny:20260305
+
+# 替换为数据库维护应用
+COPY db_maintain.R /app/app.R
+
+CMD ["R", "-e", "shiny::runApp('/app/app.R', host = '0.0.0.0', port = 3838)"]

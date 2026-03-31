@@ -48,7 +48,7 @@ services:
 
   # 4 个业务 Shiny 容器（项目管理大盘）
   app-shiny-1:
-    image: ivd_shiny:20260305
+    image: ivd_shiny:20260331
     restart: always
     environment:
       PG_HOST: db
@@ -62,7 +62,7 @@ services:
       - ivd_net
 
   app-shiny-2:
-    image: ivd_shiny:20260305
+    image: ivd_shiny:20260331
     restart: always
     environment:
       PG_HOST: db
@@ -76,7 +76,7 @@ services:
       - ivd_net
 
   app-shiny-3:
-    image: ivd_shiny:20260305
+    image: ivd_shiny:20260331
     restart: always
     environment:
       PG_HOST: db
@@ -90,7 +90,36 @@ services:
       - ivd_net
 
   app-shiny-4:
-    image: ivd_shiny:20260305
+    image: ivd_shiny:20260331
+    restart: always
+    environment:
+      PG_HOST: db
+      PG_PORT: "5432"
+      PG_DBNAME: ivd_data
+      PG_USER: myuser
+      PG_PASSWORD: mypassword
+    depends_on:
+      - db
+    networks:
+      - ivd_net
+
+  # 2 个数据库维护 Shiny 容器
+  maintain-shiny-1:
+    image: ivd_maintain_shiny:20260330
+    restart: always
+    environment:
+      PG_HOST: db
+      PG_PORT: "5432"
+      PG_DBNAME: ivd_data
+      PG_USER: myuser
+      PG_PASSWORD: mypassword
+    depends_on:
+      - db
+    networks:
+      - ivd_net
+
+  maintain-shiny-2:
+    image: ivd_maintain_shiny:20260330
     restart: always
     environment:
       PG_HOST: db
@@ -141,11 +170,14 @@ services:
       - "80:80"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/nav.html:/usr/share/nginx/html/nav.html:ro
     depends_on:
       - app-shiny-1
       - app-shiny-2
       - app-shiny-3
       - app-shiny-4
+      - maintain-shiny-1
+      - maintain-shiny-2
       - auth-shiny-1
       - auth-shiny-2
     networks:
