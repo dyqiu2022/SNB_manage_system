@@ -586,7 +586,6 @@ CREATE TABLE public."10会议决策表" (
     nc_order numeric,
     "会议名称" text,
     "会议时间" timestamp without time zone,
-    "04项目总表_id" integer,
     "决策内容" text,
     "决策执行人及执行确认" json
 );
@@ -3958,8 +3957,6 @@ CREATE INDEX fk_04__05__q8oel2kw9l ON public."_nc_m2m_04项目总表_05人员表
 -- Name: fk_04__10__b_9mqw4cim; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX fk_04__10__b_9mqw4cim ON public."10会议决策表" USING btree ("04项目总表_id");
-
 
 --
 -- Name: fk_05__01__kkag17q1u6; Type: INDEX; Schema: public; Owner: -
@@ -6096,14 +6093,6 @@ ALTER TABLE ONLY public."_nc_m2m_04项目总表_05人员表"
 
 ALTER TABLE ONLY public."_nc_m2m_04项目总表_05人员表"
     ADD CONSTRAINT fk_04__05__in8ft69hat FOREIGN KEY ("05人员表_id") REFERENCES public."05人员表"(id);
-
-
---
--- Name: 10会议决策表 fk_04__10__wuo_62xa64; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public."10会议决策表"
-    ADD CONSTRAINT fk_04__10__wuo_62xa64 FOREIGN KEY ("04项目总表_id") REFERENCES public."04项目总表"(id);
 
 
 --
