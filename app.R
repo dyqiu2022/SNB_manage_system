@@ -889,6 +889,10 @@ server <- function(input, output, session) {
   })
 
   stage_definition_df <- reactive({
+    if (is.null(.ivd_sess_once$sd_first)) {
+      ivd_perf_elapsed(t_ivd_sess0, "sess|stage_definition_df FIRST run")
+      .ivd_sess_once$sd_first <- TRUE
+    }
     t0_sd <- proc.time()
     ivd_perf_ts("stage_definition_df BEGIN")
     on.exit(ivd_perf_ts(paste0("stage_definition_df END elapsed_s=", round((proc.time() - t0_sd)[3], 3))), add = TRUE)
@@ -928,6 +932,10 @@ server <- function(input, output, session) {
   })
 
   stage_catalog <- reactive({
+    if (is.null(.ivd_sess_once$sc_first)) {
+      ivd_perf_elapsed(t_ivd_sess0, "sess|stage_catalog FIRST run")
+      .ivd_sess_once$sc_first <- TRUE
+    }
     defs <- stage_definition_df()
     unique_defs <- defs %>% arrange(stage_order, stage_key) %>% distinct(stage_key, .keep_all = TRUE)
     list(
@@ -1038,6 +1046,10 @@ server <- function(input, output, session) {
 
   # 供 gantt_sql_filter_bundle 使用：首帧用即时筛选状态，之后用 debounce（减轻快速点选筛选时的重复查询）
   gantt_filter_state_for_query <- reactive({
+    if (is.null(.ivd_sess_once$gfsq_first)) {
+      ivd_perf_elapsed(t_ivd_sess0, "sess|gantt_filter_state_for_query FIRST")
+      .ivd_sess_once$gfsq_first <- TRUE
+    }
     st <- gantt_filter_state()
     if (isTRUE(shiny::isolate(gantt_skip_query_debounce_once()))) {
       gantt_skip_query_debounce_once(FALSE)
@@ -1048,6 +1060,10 @@ server <- function(input, output, session) {
 
   # 甘特双视图共用：筛选维度 + WHERE 子句（避免 gantt_data_db / gantt_data_all_stages 重复跑人员/医院子查询）
   gantt_sql_filter_bundle <- reactive({
+    if (is.null(.ivd_sess_once$sfb_first)) {
+      ivd_perf_elapsed(t_ivd_sess0, "sess|gantt_sql_filter_bundle FIRST run")
+      .ivd_sess_once$sfb_first <- TRUE
+    }
     t0_bun <- proc.time()
     ivd_perf_ts("gantt_sql_filter_bundle BEGIN")
     on.exit(ivd_perf_ts(paste0("gantt_sql_filter_bundle END elapsed_s=", round((proc.time() - t0_bun)[3], 3))), add = TRUE)
@@ -1505,19 +1521,7 @@ server <- function(input, output, session) {
     
     # 为每个项目生成标题行（插入到该项目所有行之前）
     # R端硬截断：按显示宽度(type="width")累计，超限直接加省略号
-    truncate_label <- function(txt, max_u = 30L) {
-      txt <- as.character(txt %||% "")
-      chars <- strsplit(txt, "", fixed = TRUE)[[1]]
-      units <- 0L
-      for (k in seq_along(chars)) {
-        units <- units + nchar(chars[k], type = "width", allowNA = TRUE, keepNA = FALSE)
-        if (units > max_u) {
-          keep <- if (k <= 1L) "" else paste(chars[seq_len(k - 1L)], collapse = "")
-          return(paste0(keep, ".."))
-        }
-      }
-      txt
-    }
+    # truncate_label 已迁至 R/ivd_server_helpers.R
     proj_headers <- groups_sync %>%
       mutate(
         orig_pid    = project_id,
@@ -2564,22 +2568,7 @@ server <- function(input, output, session) {
       inst_act$actual_end_date <- as.Date(inst_act$actual_end_date)
     }
 
-    # 项目汇总「各中心进度」：有实际结束则固定 100%；否则仅在有完整计划且已填实际开始时采用库内进度，否则 0%
-    effective_center_progress_pct_for_summary <- function(ps, pe, asd, aed, raw_pct) {
-      if (length(aed) == 1L && !is.na(aed)) return(100)
-      rp <- suppressWarnings(as.numeric(raw_pct))
-      if (length(rp) != 1L || is.na(rp)) rp <- 0
-      if (rp <= 1 && rp >= 0) rp <- rp * 100
-      if (is.na(ps) || is.na(pe)) return(0)
-      if (is.na(asd)) return(0)
-      max(0, min(100, round(rp)))
-    }
-
-    fmt_amt <- function(x) {
-      x <- as.numeric(x)
-      if (length(x) != 1L || is.na(x)) return("1")
-      if (abs(x - round(x)) < 1e-9) as.character(as.integer(round(x))) else format(round(x, 2), trim = TRUE)
-    }
+    # effective_center_progress_pct_for_summary / fmt_amt 已迁至 R/ivd_server_helpers.R
 
     remark_rows <- list()
     contrib_all <- list()
@@ -2701,16 +2690,7 @@ server <- function(input, output, session) {
       ui_gantt_feedback_with_decisions(auth, pg_con, remark_df, dec_by_fid)
     }
 
-    merge_contrib_totals <- function(df) {
-      if (is.null(df) || nrow(df) == 0L) return(df)
-      df$amt_num <- vapply(seq_len(nrow(df)), function(i) parse_contrib_amount_num(df$amount[i]), numeric(1))
-      df %>%
-        group_by(person, role, work) %>%
-        summarise(total_amt = sum(amt_num, na.rm = TRUE), .groups = "drop") %>%
-        mutate(ro = contrib_role_sort_key(role)) %>%
-        arrange(person, ro, work) %>%
-        select(-ro)
-    }
+    # merge_contrib_totals 已迁至 R/ivd_server_helpers.R
 
     ui_contrib_by_person <- local({
       if (nrow(contrib_df) == 0L) {
@@ -4581,14 +4561,7 @@ server <- function(input, output, session) {
     ctx <- task_edit_context()
     req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con), ctx$col_map)
     # 校验并解析日期：非空输入必须能解析为合法日期，否则阻止保存
-    validate_date_input <- function(x) {
-      if (is.null(x)) return(list(ok = TRUE, value = NA))
-      xc <- tryCatch(trimws(as.character(x)), error = function(e) "")
-      if (!nzchar(xc)) return(list(ok = TRUE, value = NA))
-      d <- tryCatch(as.Date(xc, optional = TRUE), error = function(e) NA)
-      if (is.na(d)) return(list(ok = FALSE, value = NA))
-      list(ok = TRUE, value = d)
-    }
+    # validate_date_input 已迁至 R/ivd_server_helpers.R
     psd_res <- validate_date_input(input$edit_planned_start_date)
     asd_res <- validate_date_input(input$edit_actual_start_date)
     pd_res  <- validate_date_input(input$edit_planned_date)
@@ -5376,71 +5349,8 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "mtg_new_proj", choices = ch, selected = cur, server = FALSE)
   })
 
-  for (.erd in seq_len(.EDIT_MEETING_MAX_DEC_ID)) {
-    local({
-      r <- .erd
-      output[[paste0("meeting_edit_feed_", r)]] <- renderUI({
-        meeting_edit_nonce()
-        ctx <- meeting_edit_ctx()
-        if (is.null(ctx) || !(r %in% ctx$row_ids)) return(NULL)
-        auth <- current_user_auth()
-        if (is.null(auth) || auth$allow_none) return(NULL)
-
-        pv <- input[[paste0("edit_mtg_proj_", r)]]
-        pvs <- if (is.null(pv) || length(pv) == 0L || !nzchar(trimws(as.character(pv)[1]))) {
-          as.character(ctx$orig_proj_sel[as.character(r)])[1]
-        } else {
-          as.character(pv)[1]
-        }
-        if (is.na(pvs) || !nzchar(pvs %||% "")) pvs <- "__common__"
-
-        orig_fb <- ctx$orig_feedback[[as.character(r)]] %||% character(0)
-        orig_fb <- as.character(orig_fb)[nzchar(as.character(orig_fb))]
-
-        if (identical(pvs, "__common__")) {
-          return(tags$p(style = "color:#888;", "已选「共性决策」：无需关联项目要点。"))
-        }
-        pid <- suppressWarnings(as.integer(pvs))
-        if (is.na(pid)) {
-          return(tags$p(style = "color:#888;", "项目无效。"))
-        }
-        raw <- fetch_11_feedback_all_for_project_df(pg_con, pid)
-        flat <- meeting_new_flat_feedback_rows(raw)
-        if (nrow(flat) == 0L) {
-          return(tags$p(style = "color:#999;", "（本项目暂无已登记要点）"))
-        }
-        ch_fb <- meeting_feedback_id_choices(flat)
-        valid_ids <- as.character(flat$id)
-        sel_fb <- as.character(orig_fb)[as.character(orig_fb) %in% valid_ids]
-        tagList(
-          tags$div(
-            style = "font-weight: 600; margin-bottom: 8px; color: #1565C0;",
-            "登记要点（按登记时间从新到旧，供对照）"
-          ),
-          lapply(seq_len(nrow(flat)), function(i) {
-            tags$div(
-              class = "meeting-pt-line-readonly",
-              style = "margin-bottom: 8px;",
-              meeting_new_pt_line_tags(
-                flat$stage_label[i], flat$site_name[i], flat$typ_show[i],
-                flat$updated_at[i], flat$reporter[i], flat$content[i],
-                flat$task_key_raw[i]
-              )
-            )
-          }),
-          selectizeInput(
-            paste0("edit_mtg_fb_", r),
-            "本决策关联的要点（多选）",
-            choices = ch_fb,
-            selected = sel_fb,
-            multiple = TRUE,
-            width = "100%",
-            options = list(placeholder = "选择关联的登记要点…", plugins = list("remove_button"))
-          )
-        )
-      })
-    })
-  }
+  # meeting_edit_feed_N 的 output$ 已改为按需注册（在 .show_edit_meeting_modal 内），
+  # 不再在 server() 启动时预建 3000 个闭包
 
   output$mp_type_custom_wrap <- renderUI({
     v <- input$mp_type_preset %||% "问题"
@@ -5981,8 +5891,8 @@ server <- function(input, output, session) {
   observeEvent(input$btn_edit_mtg_3, { .show_edit_meeting_modal(3) })
   observeEvent(input$btn_edit_mtg_4, { .show_edit_meeting_modal(4) })
   observeEvent(input$btn_edit_mtg_5, { .show_edit_meeting_modal(5) })
-  # 动态处理大于5的编辑按钮
-  for (ei in 6:500) {
+  # 动态处理大于5的编辑按钮（原 6:500 → 6:100；实际会议决策 id 不会超过 100 条）
+  for (ei in 6:100) {
     local({
       eei <- ei
       observeEvent(input[[paste0("btn_edit_mtg_", eei)]], {
@@ -6085,6 +5995,74 @@ server <- function(input, output, session) {
         orig_proj_sel = orig_proj_sel
       ))
       meeting_edit_nonce(meeting_edit_nonce() + 1L)
+
+      # 按需注册编辑弹窗中用到的 output[["meeting_edit_feed_<rid>"]]
+      # 只为本次会议实际包含的决策行注册闭包（通常 1~20 个），而非预建 3000 个
+      for (.ri in seq_len(nrow(all_rows))) {
+        local({
+          .rid <- as.integer(all_rows$id[.ri])
+          output[[paste0("meeting_edit_feed_", .rid)]] <- renderUI({
+            meeting_edit_nonce()
+            ctx <- meeting_edit_ctx()
+            if (is.null(ctx) || !(.rid %in% ctx$row_ids)) return(NULL)
+            auth <- current_user_auth()
+            if (is.null(auth) || auth$allow_none) return(NULL)
+
+            pv <- input[[paste0("edit_mtg_proj_", .rid)]]
+            pvs <- if (is.null(pv) || length(pv) == 0L || !nzchar(trimws(as.character(pv)[1]))) {
+              as.character(ctx$orig_proj_sel[as.character(.rid)])[1]
+            } else {
+              as.character(pv)[1]
+            }
+            if (is.na(pvs) || !nzchar(pvs %||% "")) pvs <- "__common__"
+
+            orig_fb <- ctx$orig_feedback[[as.character(.rid)]] %||% character(0)
+            orig_fb <- as.character(orig_fb)[nzchar(as.character(orig_fb))]
+
+            if (identical(pvs, "__common__")) {
+              return(tags$p(style = "color:#888;", "已选「共性决策」：无需关联项目要点。"))
+            }
+            pid <- suppressWarnings(as.integer(pvs))
+            if (is.na(pid)) {
+              return(tags$p(style = "color:#888;", "项目无效。"))
+            }
+            raw <- fetch_11_feedback_all_for_project_df(pg_con, pid)
+            flat <- meeting_new_flat_feedback_rows(raw)
+            if (nrow(flat) == 0L) {
+              return(tags$p(style = "color:#999;", "（本项目暂无已登记要点）"))
+            }
+            ch_fb <- meeting_feedback_id_choices(flat)
+            valid_ids <- as.character(flat$id)
+            sel_fb <- as.character(orig_fb)[as.character(orig_fb) %in% valid_ids]
+            tagList(
+              tags$div(
+                style = "font-weight: 600; margin-bottom: 8px; color: #1565C0;",
+                "登记要点（按登记时间从新到旧，供对照）"
+              ),
+              lapply(seq_len(nrow(flat)), function(i) {
+                tags$div(
+                  class = "meeting-pt-line-readonly",
+                  style = "margin-bottom: 8px;",
+                  meeting_new_pt_line_tags(
+                    flat$stage_label[i], flat$site_name[i], flat$typ_show[i],
+                    flat$updated_at[i], flat$reporter[i], flat$content[i],
+                    flat$task_key_raw[i]
+                  )
+                )
+              }),
+              selectizeInput(
+                paste0("edit_mtg_fb_", .rid),
+                "本决策关联的要点（多选）",
+                choices = ch_fb,
+                selected = sel_fb,
+                multiple = TRUE,
+                width = "100%",
+                options = list(placeholder = "选择关联的登记要点…", plugins = list("remove_button"))
+              )
+            )
+          })
+        })
+      }
 
       showModal(modalDialog(
         title = "编辑会议决策",

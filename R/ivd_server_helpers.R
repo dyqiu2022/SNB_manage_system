@@ -1946,3 +1946,60 @@ check_meeting_feedback_matches_project <- function(conn, feedback_ids, project_i
   }
   NA_character_
 }
+
+# ---------- 从 server() 迁出的纯工具函数 ----------
+
+# 按显示宽度累计截断文字（processed_data 用）
+truncate_label <- function(txt, max_u = 30L) {
+  txt <- as.character(txt %||% "")
+  chars <- strsplit(txt, "", fixed = TRUE)[[1]]
+  units <- 0L
+  for (k in seq_along(chars)) {
+    units <- units + nchar(chars[k], type = "width", allowNA = TRUE, keepNA = FALSE)
+    if (units > max_u) {
+      keep <- if (k <= 1L) "" else paste(chars[seq_len(k - 1L)], collapse = "")
+      return(paste0(keep, ".."))
+    }
+  }
+  txt
+}
+
+# 项目汇总「各中心进度」百分比计算（observeEvent project_header_clicked 用）
+effective_center_progress_pct_for_summary <- function(ps, pe, asd, aed, raw_pct) {
+  if (length(aed) == 1L && !is.na(aed)) return(100)
+  rp <- suppressWarnings(as.numeric(raw_pct))
+  if (length(rp) != 1L || is.na(rp)) rp <- 0
+  if (rp <= 1 && rp >= 0) rp <- rp * 100
+  if (is.na(ps) || is.na(pe)) return(0)
+  if (is.na(asd)) return(0)
+  max(0, min(100, round(rp)))
+}
+
+# 格式化数量（整数或保留2位小数）
+fmt_amt <- function(x) {
+  x <- as.numeric(x)
+  if (length(x) != 1L || is.na(x)) return("1")
+  if (abs(x - round(x)) < 1e-9) as.character(as.integer(round(x))) else format(round(x, 2), trim = TRUE)
+}
+
+# 合并贡献者按 person+role+work 汇总数量（项目汇总用）
+merge_contrib_totals <- function(df) {
+  if (is.null(df) || nrow(df) == 0L) return(df)
+  df$amt_num <- vapply(seq_len(nrow(df)), function(i) parse_contrib_amount_num(df$amount[i]), numeric(1))
+  df %>%
+    group_by(person, role, work) %>%
+    summarise(total_amt = sum(amt_num, na.rm = TRUE), .groups = "drop") %>%
+    mutate(ro = contrib_role_sort_key(role)) %>%
+    arrange(person, ro, work) %>%
+    select(-ro)
+}
+
+# 日期输入校验（保存任务用）
+validate_date_input <- function(x) {
+  if (is.null(x)) return(list(ok = TRUE, value = NA))
+  xc <- tryCatch(trimws(as.character(x)), error = function(e) "")
+  if (!nzchar(xc)) return(list(ok = TRUE, value = NA))
+  d <- tryCatch(as.Date(xc, optional = TRUE), error = function(e) NA)
+  if (is.na(d)) return(list(ok = FALSE, value = NA))
+  list(ok = TRUE, value = d)
+}
