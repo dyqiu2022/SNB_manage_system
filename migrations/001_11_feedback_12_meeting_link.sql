@@ -3,18 +3,8 @@
 -- 2) 建立 12 会议决策 ↔ 11 关联
 -- 3) 原 10.04项目总表_id 的语义由「12→11→04」承担：迁移占位 11 + 12 后删除 10 上该列及外键
 --
--- 登记人 / 反馈人：写入 11.reporters_json（jsonb 字符串数组）。来源包括
---   • 对象字段 reporters（数组；或 JSON 字符串类型存「陈佩云」单人名 /「甲、乙」/ 字面量 JSON 数组字符串）、reporter（字符串）
---   • 历史兼容：登记人、反馈人、填报人（字符串或数组）
---   • 管道串 legacy：第一段为反馈人
---   • 应用侧 is_legacy_name_time_key：条目键常为 「姓名_yyyyMMddHHmmss」，JSON 里 reporters 多为 []，
---     迁移时从条目键推断反馈人（与 parse_entry_key_label 一致）
--- 若已执行过本脚本并执行了下方「清空 09.remark_json」且未备份，则无法从库内自动找回旧 JSON；
---   可从整库备份恢复后重跑，或事先备份列并执行 migrations/003_backfill_11_reporters_from_remark_backup.sql
---
 -- 执行前请备份。psql: \i migrations/001_11_feedback_12_meeting_link.sql
 -- 可重复执行：占位回填仅在 10 仍存在 04项目总表_id 时执行；删列使用 IF EXISTS
--- 若需「项目级要点」（11.09 可为 NULL）：在 001 之后执行 migrations/002_11_nullable_09_project_scope.sql
 -- =============================================================================
 
 BEGIN;
@@ -68,7 +58,6 @@ DECLARE
   r RECORD;
   kv RECORD;
   v jsonb;
-  v_try jsonb;
   typ text;
   cont text;
   upd text;
@@ -76,8 +65,6 @@ DECLARE
   raw text;
   parts text[];
   ek text;
-  kname text;
-  rs text;
 BEGIN
   FOR r IN
     SELECT si.id AS sid, si.project_id AS pid, si.remark_json AS rj
@@ -101,68 +88,10 @@ BEGIN
         upd := COALESCE(NULLIF(trim(v ->> 'updated_at'), ''), NULLIF(trim(v ->> '更新日期'), ''), '');
         IF (v ? 'reporters') AND jsonb_typeof(v -> 'reporters') = 'array' THEN
           rj := v -> 'reporters';
-        ELSIF (v ? 'reporters') AND jsonb_typeof(v -> 'reporters') = 'string' THEN
-          rs := trim(COALESCE(v ->> 'reporters', ''));
-          IF rs = '' THEN
-            rj := '[]'::jsonb;
-          ELSIF substring(rs FROM 1 FOR 1) = '[' THEN
-            BEGIN
-              rj := rs::jsonb;
-              IF jsonb_typeof(rj) <> 'array' THEN
-                rj := to_jsonb(ARRAY[rs]);
-              END IF;
-            EXCEPTION
-              WHEN OTHERS THEN
-                SELECT COALESCE((
-                  SELECT jsonb_agg(to_jsonb(btrim(t.e)) ORDER BY t.ord)
-                  FROM unnest(regexp_split_to_array(rs, '[、，,]+')) WITH ORDINALITY AS t(e, ord)
-                  WHERE btrim(t.e) <> ''
-                ), '[]'::jsonb)
-                INTO rj;
-            END;
-          ELSE
-            SELECT COALESCE((
-              SELECT jsonb_agg(to_jsonb(btrim(t.e)) ORDER BY t.ord)
-              FROM unnest(regexp_split_to_array(rs, '[、，,]+')) WITH ORDINALITY AS t(e, ord)
-              WHERE btrim(t.e) <> ''
-            ), '[]'::jsonb)
-            INTO rj;
-          END IF;
         ELSIF (v ? 'reporter') THEN
           rj := to_jsonb(ARRAY[trim(COALESCE(v ->> 'reporter', ''))]);
           IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
             rj := '[]'::jsonb;
-          END IF;
-        END IF;
-        -- 历史数据可能只用中文键存「登记人/反馈人」，未使用 reporters / reporter
-        IF rj = '[]'::jsonb THEN
-          IF (v ? '登记人') THEN
-            IF jsonb_typeof(v -> '登记人') = 'array' THEN
-              rj := v -> '登记人';
-            ELSE
-              rj := to_jsonb(ARRAY[trim(COALESCE(v ->> '登记人', ''))]);
-              IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-                rj := '[]'::jsonb;
-              END IF;
-            END IF;
-          ELSIF (v ? '反馈人') THEN
-            IF jsonb_typeof(v -> '反馈人') = 'array' THEN
-              rj := v -> '反馈人';
-            ELSE
-              rj := to_jsonb(ARRAY[trim(COALESCE(v ->> '反馈人', ''))]);
-              IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-                rj := '[]'::jsonb;
-              END IF;
-            END IF;
-          ELSIF (v ? '填报人') THEN
-            IF jsonb_typeof(v -> '填报人') = 'array' THEN
-              rj := v -> '填报人';
-            ELSE
-              rj := to_jsonb(ARRAY[trim(COALESCE(v ->> '填报人', ''))]);
-              IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-                rj := '[]'::jsonb;
-              END IF;
-            END IF;
           END IF;
         END IF;
       ELSIF jsonb_typeof(v) = 'string' THEN
@@ -170,101 +99,20 @@ BEGIN
         IF raw IS NULL THEN
           raw := '';
         END IF;
-        v_try := NULL;
-        BEGIN
-          IF btrim(raw) <> '' AND substring(btrim(raw) FROM 1 FOR 1) = '{' THEN
-            v_try := raw::jsonb;
-          END IF;
-        EXCEPTION
-          WHEN OTHERS THEN
-            v_try := NULL;
+        parts := string_to_array(raw, '|');
+        IF array_length(parts, 1) IS NULL THEN
+          parts := ARRAY[''];
+        END IF;
+        typ := COALESCE(NULLIF(trim(
+          CASE WHEN array_length(parts, 1) >= 2 THEN parts[2] ELSE '' END
+        ), ''), '问题/卡点/经验分享');
+        cont := CASE
+          WHEN array_length(parts, 1) > 2 THEN array_to_string(parts[3:array_length(parts, 1)], '|', '')
+          ELSE ''
         END;
-        IF v_try IS NOT NULL AND jsonb_typeof(v_try) = 'object' THEN
-          typ := COALESCE(NULLIF(trim(v_try ->> 'type'), ''), '问题/卡点/经验分享');
-          cont := COALESCE(v_try ->> 'content', '');
-          upd := COALESCE(NULLIF(trim(v_try ->> 'updated_at'), ''), NULLIF(trim(v_try ->> '更新日期'), ''), '');
-          rj := '[]'::jsonb;
-          IF (v_try ? 'reporters') AND jsonb_typeof(v_try -> 'reporters') = 'array' THEN
-            rj := v_try -> 'reporters';
-          ELSIF (v_try ? 'reporters') AND jsonb_typeof(v_try -> 'reporters') = 'string' THEN
-            rs := trim(COALESCE(v_try ->> 'reporters', ''));
-            IF rs = '' THEN
-              rj := '[]'::jsonb;
-            ELSIF substring(rs FROM 1 FOR 1) = '[' THEN
-              BEGIN
-                rj := rs::jsonb;
-                IF jsonb_typeof(rj) <> 'array' THEN
-                  rj := to_jsonb(ARRAY[rs]);
-                END IF;
-              EXCEPTION
-                WHEN OTHERS THEN
-                  SELECT COALESCE((
-                    SELECT jsonb_agg(to_jsonb(btrim(t.e)) ORDER BY t.ord)
-                    FROM unnest(regexp_split_to_array(rs, '[、，,]+')) WITH ORDINALITY AS t(e, ord)
-                    WHERE btrim(t.e) <> ''
-                  ), '[]'::jsonb)
-                  INTO rj;
-              END;
-            ELSE
-              SELECT COALESCE((
-                SELECT jsonb_agg(to_jsonb(btrim(t.e)) ORDER BY t.ord)
-                FROM unnest(regexp_split_to_array(rs, '[、，,]+')) WITH ORDINALITY AS t(e, ord)
-                WHERE btrim(t.e) <> ''
-              ), '[]'::jsonb)
-              INTO rj;
-            END IF;
-          ELSIF (v_try ? 'reporter') THEN
-            rj := to_jsonb(ARRAY[trim(COALESCE(v_try ->> 'reporter', ''))]);
-            IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-              rj := '[]'::jsonb;
-            END IF;
-          END IF;
-          IF rj = '[]'::jsonb THEN
-            IF (v_try ? '登记人') THEN
-              IF jsonb_typeof(v_try -> '登记人') = 'array' THEN
-                rj := v_try -> '登记人';
-              ELSE
-                rj := to_jsonb(ARRAY[trim(COALESCE(v_try ->> '登记人', ''))]);
-                IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-                  rj := '[]'::jsonb;
-                END IF;
-              END IF;
-            ELSIF (v_try ? '反馈人') THEN
-              IF jsonb_typeof(v_try -> '反馈人') = 'array' THEN
-                rj := v_try -> '反馈人';
-              ELSE
-                rj := to_jsonb(ARRAY[trim(COALESCE(v_try ->> '反馈人', ''))]);
-                IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-                  rj := '[]'::jsonb;
-                END IF;
-              END IF;
-            ELSIF (v_try ? '填报人') THEN
-              IF jsonb_typeof(v_try -> '填报人') = 'array' THEN
-                rj := v_try -> '填报人';
-              ELSE
-                rj := to_jsonb(ARRAY[trim(COALESCE(v_try ->> '填报人', ''))]);
-                IF rj = 'null'::jsonb OR rj = '[""]'::jsonb THEN
-                  rj := '[]'::jsonb;
-                END IF;
-              END IF;
-            END IF;
-          END IF;
-        ELSE
-          parts := string_to_array(raw, '|');
-          IF array_length(parts, 1) IS NULL THEN
-            parts := ARRAY[''];
-          END IF;
-          typ := COALESCE(NULLIF(trim(
-            CASE WHEN array_length(parts, 1) >= 2 THEN parts[2] ELSE '' END
-          ), ''), '问题/卡点/经验分享');
-          cont := CASE
-            WHEN array_length(parts, 1) > 2 THEN array_to_string(parts[3:array_length(parts, 1)], '|', '')
-            ELSE ''
-          END;
-          upd := '';
-          IF array_length(parts, 1) >= 1 AND NULLIF(trim(parts[1]), '') IS NOT NULL THEN
-            rj := to_jsonb(ARRAY[trim(parts[1])]);
-          END IF;
+        upd := '';
+        IF array_length(parts, 1) >= 1 AND NULLIF(trim(parts[1]), '') IS NOT NULL THEN
+          rj := to_jsonb(ARRAY[trim(parts[1])]);
         END IF;
       ELSE
         typ := '问题/卡点/经验分享';
@@ -274,22 +122,6 @@ BEGIN
 
       IF NULLIF(trim(cont), '') IS NULL THEN
         CONTINUE;
-      END IF;
-
-      IF jsonb_typeof(rj) = 'array' THEN
-        SELECT COALESCE((
-          SELECT jsonb_agg(to_jsonb(btrim(t.x)) ORDER BY t.ord)
-          FROM jsonb_array_elements_text(rj) WITH ORDINALITY AS t(x, ord)
-          WHERE btrim(t.x) <> ''
-        ), '[]'::jsonb)
-        INTO rj;
-      END IF;
-
-      IF (rj = '[]'::jsonb OR rj IS NULL) AND ek ~ '_[0-9]{14}$' THEN
-        kname := trim(regexp_replace(ek, '_([0-9]{14})$', ''));
-        IF kname <> '' THEN
-          rj := to_jsonb(ARRAY[kname]);
-        END IF;
       END IF;
 
       INSERT INTO public."11阶段问题反馈表" (
