@@ -28,6 +28,7 @@ RUN mkdir -p /usr/local/lib/R/site-library && \
   R -e "stopifnot(requireNamespace('shiny', quietly = TRUE, lib.loc = '/usr/local/lib/R/site-library'))"
 
 COPY app.R /app/app.R
+COPY R/ /app/R/
 WORKDIR /app
 EXPOSE 3838
 
