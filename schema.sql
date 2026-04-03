@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict unnVYNWeyOfodLjTNdwPv6W3JoTe3J95QZoLo5aecK0fLarciGkz7i7h3xViqZz
+\restrict ged8a21uCeRbdKRK3dn6EDOYgTxsawyA00asyCg6sscemvM4dSHa7xDYs19vAG0
 
 -- Dumped from database version 15.15 (Debian 15.15-1.pgdg13+1)
 -- Dumped by pg_dump version 15.15 (Debian 15.15-1.pgdg13+1)
@@ -579,7 +579,7 @@ ALTER SEQUENCE public."09项目阶段实例表_id_seq" OWNED BY public."09项目
 
 CREATE TABLE public."10会议决策表" (
     id integer NOT NULL,
-    created_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now(),
     updated_at timestamp without time zone,
     created_by character varying,
     updated_by character varying,
@@ -587,7 +587,7 @@ CREATE TABLE public."10会议决策表" (
     "会议名称" text,
     "会议时间" timestamp without time zone,
     "决策内容" text,
-    "决策执行人及执行确认" json
+    "决策执行人及执行确认" jsonb
 );
 
 
@@ -609,6 +609,98 @@ CREATE SEQUENCE public."10会议决策表_id_seq"
 --
 
 ALTER SEQUENCE public."10会议决策表_id_seq" OWNED BY public."10会议决策表".id;
+
+
+--
+-- Name: 11阶段问题反馈表; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public."11阶段问题反馈表" (
+    id bigint NOT NULL,
+    "09项目阶段实例表_id" bigint,
+    "04项目总表_id" integer NOT NULL,
+    "条目键" text NOT NULL,
+    entry_key_legacy text,
+    "类型" text DEFAULT ''::text NOT NULL,
+    "内容" text DEFAULT ''::text NOT NULL,
+    reporters_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    "更新日期" text DEFAULT ''::text NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_by_work_id text,
+    updated_by_name text
+);
+
+
+--
+-- Name: TABLE "11阶段问题反馈表"; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public."11阶段问题反馈表" IS '问题/卡点/经验分享（由 09.remark_json 迁出；应用侧主数据源）';
+
+
+--
+-- Name: COLUMN "11阶段问题反馈表"."09项目阶段实例表_id"; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public."11阶段问题反馈表"."09项目阶段实例表_id" IS 'NULL 表示项目级要点（不分中心/阶段），仅通过 04项目总表_id 归属项目';
+
+
+--
+-- Name: 11阶段问题反馈表_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public."11阶段问题反馈表_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: 11阶段问题反馈表_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public."11阶段问题反馈表_id_seq" OWNED BY public."11阶段问题反馈表".id;
+
+
+--
+-- Name: 12会议决策关联问题表; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public."12会议决策关联问题表" (
+    id bigint NOT NULL,
+    "10会议决策表_id" integer NOT NULL,
+    "11阶段问题反馈表_id" bigint NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: TABLE "12会议决策关联问题表"; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public."12会议决策关联问题表" IS '会议决策记录与 11 反馈条目的关联（项目维度经 11→04 解析）';
+
+
+--
+-- Name: 12会议决策关联问题表_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public."12会议决策关联问题表_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: 12会议决策关联问题表_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public."12会议决策关联问题表_id_seq" OWNED BY public."12会议决策关联问题表".id;
 
 
 --
@@ -2969,6 +3061,20 @@ ALTER TABLE ONLY public."10会议决策表" ALTER COLUMN id SET DEFAULT nextval(
 
 
 --
+-- Name: 11阶段问题反馈表 id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."11阶段问题反馈表" ALTER COLUMN id SET DEFAULT nextval('public."11阶段问题反馈表_id_seq"'::regclass);
+
+
+--
+-- Name: 12会议决策关联问题表 id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."12会议决策关联问题表" ALTER COLUMN id SET DEFAULT nextval('public."12会议决策关联问题表_id_seq"'::regclass);
+
+
+--
 -- Name: nc_api_tokens id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -3057,6 +3163,22 @@ ALTER TABLE ONLY public."09项目阶段实例表"
 
 ALTER TABLE ONLY public."10会议决策表"
     ADD CONSTRAINT "10会议决策表_pkey" PRIMARY KEY (id);
+
+
+--
+-- Name: 11阶段问题反馈表 11阶段问题反馈表_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."11阶段问题反馈表"
+    ADD CONSTRAINT "11阶段问题反馈表_pkey" PRIMARY KEY (id);
+
+
+--
+-- Name: 12会议决策关联问题表 12会议决策关联问题表_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."12会议决策关联问题表"
+    ADD CONSTRAINT "12会议决策关联问题表_pkey" PRIMARY KEY (id);
 
 
 --
@@ -3820,6 +3942,14 @@ ALTER TABLE ONLY public."03医院_项目表"
 
 
 --
+-- Name: 12会议决策关联问题表 uq_12_decision_issue; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."12会议决策关联问题表"
+    ADD CONSTRAINT uq_12_decision_issue UNIQUE ("10会议决策表_id", "11阶段问题反馈表_id");
+
+
+--
 -- Name: 08项目阶段定义表 uq_stage_def; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3905,13 +4035,6 @@ CREATE INDEX "07操作审计表_order_idx" ON public."07操作审计表" USING b
 
 
 --
--- Name: 10会议决策表_order_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX "10会议决策表_order_idx" ON public."10会议决策表" USING btree (nc_order);
-
-
---
 -- Name: fk_01__02__f3f0wgucgg; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3954,11 +4077,6 @@ CREATE INDEX fk_04__05__q8oel2kw9l ON public."_nc_m2m_04项目总表_05人员表
 
 
 --
--- Name: fk_04__10__b_9mqw4cim; Type: INDEX; Schema: public; Owner: -
---
-
-
---
 -- Name: fk_05__01__kkag17q1u6; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3998,6 +4116,34 @@ CREATE INDEX fk_05__06__vr4i9fxndc ON public."06样本资源表" USING btree ("0
 --
 
 CREATE INDEX fk_project_ta_hos_projec_uy_npx1dla ON public."03医院_项目表" USING btree ("project_table 项目总表_id");
+
+
+--
+-- Name: idx_11_feedback_09; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_11_feedback_09 ON public."11阶段问题反馈表" USING btree ("09项目阶段实例表_id");
+
+
+--
+-- Name: idx_11_feedback_project; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_11_feedback_project ON public."11阶段问题反馈表" USING btree ("04项目总表_id");
+
+
+--
+-- Name: idx_12_10; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_12_10 ON public."12会议决策关联问题表" USING btree ("10会议决策表_id");
+
+
+--
+-- Name: idx_12_11; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_12_11 ON public."12会议决策关联问题表" USING btree ("11阶段问题反馈表_id");
 
 
 --
@@ -5975,6 +6121,20 @@ CREATE INDEX sync_configs_integration_model ON public.nc_sync_configs USING btre
 
 
 --
+-- Name: uq_11_project_entry_no_09; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_11_project_entry_no_09 ON public."11阶段问题反馈表" USING btree ("04项目总表_id", "条目键") WHERE ("09项目阶段实例表_id" IS NULL);
+
+
+--
+-- Name: uq_11_stage_entry_when_09; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_11_stage_entry_when_09 ON public."11阶段问题反馈表" USING btree ("09项目阶段实例表_id", "条目键") WHERE ("09项目阶段实例表_id" IS NOT NULL);
+
+
+--
 -- Name: user_comments_preference_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -6045,6 +6205,30 @@ ALTER TABLE ONLY public."09项目阶段实例表"
 
 ALTER TABLE ONLY public."09项目阶段实例表"
     ADD CONSTRAINT "09项目阶段实例表_stage_def_id_fkey" FOREIGN KEY (stage_def_id) REFERENCES public."08项目阶段定义表"(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: 11阶段问题反馈表 11阶段问题反馈表_09项目阶段实例表_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."11阶段问题反馈表"
+    ADD CONSTRAINT "11阶段问题反馈表_09项目阶段实例表_id_fkey" FOREIGN KEY ("09项目阶段实例表_id") REFERENCES public."09项目阶段实例表"(id) ON DELETE CASCADE;
+
+
+--
+-- Name: 12会议决策关联问题表 12会议决策关联问题表_10会议决策表_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."12会议决策关联问题表"
+    ADD CONSTRAINT "12会议决策关联问题表_10会议决策表_id_fkey" FOREIGN KEY ("10会议决策表_id") REFERENCES public."10会议决策表"(id) ON DELETE CASCADE;
+
+
+--
+-- Name: 12会议决策关联问题表 12会议决策关联问题表_11阶段问题反馈表_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public."12会议决策关联问题表"
+    ADD CONSTRAINT "12会议决策关联问题表_11阶段问题反馈表_id_fkey" FOREIGN KEY ("11阶段问题反馈表_id") REFERENCES public."11阶段问题反馈表"(id) ON DELETE CASCADE;
 
 
 --
@@ -6147,5 +6331,5 @@ ALTER TABLE ONLY public."03医院_项目表"
 -- PostgreSQL database dump complete
 --
 
-\unrestrict unnVYNWeyOfodLjTNdwPv6W3JoTe3J95QZoLo5aecK0fLarciGkz7i7h3xViqZz
+\unrestrict ged8a21uCeRbdKRK3dn6EDOYgTxsawyA00asyCg6sscemvM4dSHa7xDYs19vAG0
 
