@@ -53,6 +53,46 @@ docker.exe logs ivd_project-app-shiny-4-1 --tail 20
 5. `docker.exe compose -f C:\\IVD_Project\\docker-compose.yml up -d app-shiny-1 app-shiny-2 app-shiny-3 app-shiny-4`
 6. 等 8 秒后检查全部 4 个容器日志
 
+### Shiny 性能：禁止批量创建 observeEvent / output 闭包
+
+**绝对禁止**在 `for` 循环中注册 `observeEvent`、`observe`、`output$x` 闭包。Shiny 在 `server()` 函数体执行时逐一创建闭包并注册到 session，每个闭包消耗 ~5-10ms。循环 3000 次的 `observeEvent` 仅注册就吃掉 25-35 秒，导致首屏白屏。
+
+**历史教训**：本项目的会议决策模块曾为每条可能的决策行（for 1:3000）和每个执行人按钮（for 1:5000）预注册闭包，server() 注册阶段 35 秒，首屏 53 秒。优化后注册阶段降至 ~2 秒，首屏 ~5 秒。
+
+#### 替代方案
+
+| 场景 | 禁止写法 | 正确写法 |
+|------|---------|---------|
+| N 个动态按钮的点击处理 | `for(i in 1:N) observeEvent(input[[paste0("btn_",i)]], ...)` | **JS 事件委托**：所有按钮统一 class/id 前缀，前端 jQuery `$(document).on('click', selector, fn)` 用 `Shiny.onInputChange('统一input名', id_nonce)` 发送，R 端只需 **1 个** `observeEvent(input$统一input名)` |
+| N 个动态输出 | `for(i in 1:N) output[[paste0("ui_",i)]] <- renderUI(...)` | **懒注册**：先注册 1 个容器 `output$dynamic_area <- renderUI(...)`，在用户触发操作时才生成具体内容；或用 `insertUI` / `renderUI` + lapply 按需生成 |
+| actionLink/actionButton 的重复点击 | 同一 value 的 `Shiny.setInputValue` 不触发 observeEvent | 值必须每次不同：拼接 `Date.now()`（JS）或 `Sys.time()` nonce（R）；`observeEvent` 监听的 reactiveVal 也需加 nonce 保证值变化 |
+
+#### JS 事件委托模板
+
+```javascript
+// 在 tags$head(tags$script(HTML("..."))) 中注册一次
+$(document).on('click', '.your-btn-class', function(e) {
+  e.preventDefault();
+  var id = $(this).attr('data-id') || this.id.replace('prefix_', '');
+  Shiny.onInputChange('your_unified_input', id + '_' + Date.now());
+});
+```
+```r
+# R 端只需一个 observeEvent
+observeEvent(input$your_unified_input, {
+  raw <- input$your_unified_input
+  id <- as.integer(sub("_.*$", "", as.character(raw)))
+  if (is.na(id)) return
+  # 处理逻辑...
+}, ignoreInit = TRUE)
+```
+
+#### observeEvent 重复触发陷阱
+
+`observeEvent` 仅在**值发生变化**时触发。两个常见陷阱：
+1. `Shiny.onInputChange / setInputValue` 发送相同值 → 不触发。**必须拼接 nonce**（如 `id + '_' + Date.now()`）
+2. 中间 reactiveVal 设置相同 list → 下游 `observeEvent(rv())` 不触发。**在 list 中加 `nonce = as.character(Sys.time())`** 保证每次值不同
+
 ### 代码注意事项
 - `current_user_auth()` 没有 `$ok` 字段，用 `allow_none` 和 `allow_all` 判断权限
 - PostgreSQL `json` 列通过 RPostgres 读取后是 `list` 类型，必须 `::text` 转换或 `as.character()` 后再处理

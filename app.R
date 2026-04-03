@@ -348,7 +348,7 @@ ui <- fluidPage(
     tags$script(HTML("
       // 甘特 / 会议决策 筛选「且条件 / 或条件」：点击即时改文案 + 同步 Shiny
       (function() {
-        $(document).on('click', '#gantt_filter_combine_btn, #mtg_filter_combine_btn', function(e) {
+        $(document).on('click', '#gantt_filter_combine_btn, #mtg_filter_combine_btn, #mtg_new_filter_combine_btn', function(e) {
           e.preventDefault();
           var btn = $(this);
           var mode = btn.attr('data-mode') || 'and';
@@ -356,11 +356,28 @@ ui <- fluidPage(
           btn.attr('data-mode', mode);
           btn.text(mode === 'and' ? '且条件' : '或条件');
           if (window.Shiny && Shiny.setInputValue) {
-            var inputName = btn.attr('id') === 'gantt_filter_combine_btn' ? 'gantt_filter_combine_mode' : 'mtg_filter_combine_mode';
+            var bid = btn.attr('id');
+            var inputName = bid === 'gantt_filter_combine_btn' ? 'gantt_filter_combine_mode'
+              : (bid === 'mtg_filter_combine_btn' ? 'mtg_filter_combine_mode' : 'mtg_new_filter_combine_mode');
             Shiny.setInputValue(inputName, mode, { priority: 'event' });
           }
         });
       })();
+    ")),
+    tags$script(HTML("
+      // 执行人状态点击 & 会议编辑按钮：事件委托，每次点击附带唯一 nonce 保证 observeEvent 可重复触发
+      $(document).on('click', 'a[id^=\"exec_status_\"], .exec-status-link', function(e) {
+        e.preventDefault();
+        var id = (this.id || '').replace('exec_status_', '');
+        if (!id) return;
+        Shiny.onInputChange('exec_status_clicked', id + '_' + Date.now());
+      });
+      $(document).on('click', '.btn-edit-mtg', function(e) {
+        e.preventDefault();
+        var id = $(this).attr('data-mtg-id');
+        if (!id) return;
+        Shiny.onInputChange('mtg_edit_clicked', id + '_' + Date.now());
+      });
     ")),
     tags$style(HTML("
       /* 紧凑进度条与里程碑控件：让 item 高度贴近内部文字，节省纵向空间 */
@@ -477,8 +494,7 @@ ui <- fluidPage(
       .gantt-sidebar-wrap.collapsed .gantt-sidebar-body {
         display: none !important;
       }
-      .gantt-sidebar-wrap.collapsed #gantt_sidebar_toggle,
-      .gantt-sidebar-wrap.collapsed #meeting_sidebar_toggle {
+      .gantt-sidebar-wrap.collapsed #gantt_sidebar_toggle {
         width: 100% !important;
         max-width: 24px;
         min-width: 22px;
@@ -529,7 +545,7 @@ ui <- fluidPage(
         .gantt-sidebar-wrap.collapsed .gantt-sidebar-body { display: none !important; }
         .gantt-main-wrap { padding-left: 0; }
       }
-      /* 会议决策行布局与甘特共用 gantt-row-flex / gantt-sidebar-wrap / gantt-main-wrap */
+      /* 会议决策主区使用 gantt-main-wrap（无侧栏时 padding-left:0 在 meeting_tab_ui 覆盖） */
       .meeting-panel {
         border: 1px solid #ddd;
         border-radius: 6px;
@@ -604,7 +620,7 @@ ui <- fluidPage(
       }
     ")),
     tags$script(HTML("
-      $(document).on('click', '#gantt_sidebar_toggle, #meeting_sidebar_toggle', function() {
+      $(document).on('click', '#gantt_sidebar_toggle', function() {
         var col = $(this).closest('.gantt-sidebar-wrap');
         if (!col.length) return;
         col.toggleClass('collapsed');
@@ -700,7 +716,7 @@ ui <- fluidPage(
              "),
               tags$div(
                 class = "gantt-chart-host",
-                timevisOutput("my_gantt", height = "100%")
+              timevisOutput("my_gantt", height = "100%")
               )
             )
           )
@@ -1178,47 +1194,8 @@ server <- function(input, output, session) {
     ivd_perf_ts("gantt_filter_options BEGIN")
     on.exit(ivd_perf_ts(paste0("gantt_filter_options END elapsed_s=", round((proc.time() - t0_go)[3], 3))), add = TRUE)
     input$gantt_refresh
-    current_user_auth()
-    if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return(NULL)
     auth <- current_user_auth()
-    if (auth$allow_none) {
-      return(list(types = character(0), names = character(0), managers = character(0), participants = character(0), importance = character(0), hospitals = character(0)))
-    }
-    and_04 <- if (auth$allow_all) "" else paste0(" AND id IN (", auth$allowed_subquery, ")")
-    and_g  <- if (auth$allow_all) "" else paste0(" AND g.id IN (", auth$allowed_subquery, ")")
-    and_m  <- if (auth$allow_all) "" else paste0(" AND m.\"04项目总表_id\" IN (", auth$allowed_subquery, ")")
-    and_s  <- if (auth$allow_all) "" else paste0(" AND s.\"project_table 项目总表_id\" IN (", auth$allowed_subquery, ")")
-    tryCatch({
-      types <- character(0)
-      names_ <- character(0)
-      managers <- character(0)
-      participants <- character(0)
-      importance <- character(0)
-      hospitals <- character(0)
-      t1 <- DBI::dbGetQuery(pg_con, paste0('SELECT DISTINCT "项目类型" AS v FROM public."04项目总表" WHERE "项目类型" IS NOT NULL', and_04, ' ORDER BY 1'))
-      if (nrow(t1) > 0) types <- as.character(t1$v)
-      t2 <- DBI::dbGetQuery(pg_con, paste0('SELECT DISTINCT "项目名称" AS v FROM public."04项目总表" WHERE "项目名称" IS NOT NULL', and_04, ' ORDER BY 1'))
-      if (nrow(t2) > 0) names_ <- as.character(t2$v)
-      t3 <- DBI::dbGetQuery(pg_con, paste0('SELECT DISTINCT p."姓名" AS v FROM public."05人员表" p INNER JOIN public."04项目总表" g ON g."05人员表_id" = p.id WHERE g."05人员表_id" IS NOT NULL', and_g, ' ORDER BY 1'))
-      if (nrow(t3) > 0) managers <- as.character(t3$v)
-      t4 <- tryCatch(
-        DBI::dbGetQuery(pg_con, paste0('SELECT DISTINCT p."姓名" AS v FROM public."05人员表" p INNER JOIN public."_nc_m2m_04项目总表_05人员表" m ON m."05人员表_id" = p.id WHERE 1=1', and_m, ' ORDER BY 1')),
-        error = function(e) data.frame(v = character(0))
-      )
-      if (nrow(t4) > 0) participants <- as.character(t4$v)
-      t5 <- DBI::dbGetQuery(pg_con, paste0('SELECT DISTINCT "重要紧急程度" AS v FROM public."04项目总表" WHERE "重要紧急程度" IS NOT NULL', and_04, ' ORDER BY 1'))
-      if (nrow(t5) > 0) importance <- as.character(t5$v)
-      t6 <- DBI::dbGetQuery(pg_con, paste0('SELECT DISTINCT h."医院名称" AS v FROM public."01医院信息表" h INNER JOIN public."03医院_项目表" s ON s."01_hos_resource_table医院信息表_id" = h.id WHERE h."医院名称" IS NOT NULL', and_s, ' ORDER BY 1'))
-      if (nrow(t6) > 0) hospitals <- as.character(t6$v)
-      list(
-        types = types,
-        names = names_,
-        managers = managers,
-        participants = participants,
-        importance = importance,
-        hospitals = hospitals
-      )
-    }, error = function(e) NULL)
+    fetch_gantt_dim_filter_options(pg_con, auth)
   })
 
   # 筛选下拉选项来自 DB；控件在 UI 中静态声明，避免 renderUI 整页重建导致 input 销毁/重建 → 甘特反复全量重算
@@ -1245,6 +1222,69 @@ server <- function(input, output, session) {
     updateSelectInput(session, "filter_importance", choices = opts$importance, selected = sel_intersect_choices(fi, opts$importance))
     updateSelectInput(session, "filter_hospital", choices = opts$hospitals, selected = sel_intersect_choices(fh, opts$hospitals))
     ivd_perf_elapsed(t0_fs, "observe gantt_filter updateSelectInput×6")
+  })
+
+  # 新建会议：甘特同款维度筛「选择项目」下拉选项
+  meeting_new_gantt_filter_options <- reactive({
+    input$mtg_refresh
+    input$mtg_new_dim_refresh %||% 0
+    meeting_force_refresh()
+    auth <- current_user_auth()
+    fetch_gantt_dim_filter_options(pg_con, auth)
+  })
+
+  observe({
+    opts <- meeting_new_gantt_filter_options()
+    if (is.null(opts)) return(NULL)
+    isolate({
+      ft <- input$mtg_new_filter_type
+      fn <- input$mtg_new_filter_name
+      fm <- input$mtg_new_filter_manager
+      fp <- input$mtg_new_filter_participant
+      fi <- input$mtg_new_filter_importance
+      fh <- input$mtg_new_filter_hospital
+    })
+    updateSelectInput(session, "mtg_new_filter_type", choices = opts$types, selected = sel_intersect_choices(ft, opts$types))
+    updateSelectInput(session, "mtg_new_filter_name", choices = opts$names, selected = sel_intersect_choices(fn, opts$names))
+    updateSelectInput(session, "mtg_new_filter_manager", choices = opts$managers, selected = sel_intersect_choices(fm, opts$managers))
+    updateSelectInput(session, "mtg_new_filter_participant", choices = opts$participants, selected = sel_intersect_choices(fp, opts$participants))
+    updateSelectInput(session, "mtg_new_filter_importance", choices = opts$importance, selected = sel_intersect_choices(fi, opts$importance))
+    updateSelectInput(session, "mtg_new_filter_hospital", choices = opts$hospitals, selected = sel_intersect_choices(fh, opts$hospitals))
+  })
+
+  meeting_new_filter_state <- reactive({
+    meeting_force_refresh()
+    input$mtg_refresh
+    input$mtg_new_dim_refresh %||% 0
+    list(
+      type = if (is.null(input$mtg_new_filter_type)) character(0) else input$mtg_new_filter_type,
+      name = if (is.null(input$mtg_new_filter_name)) character(0) else input$mtg_new_filter_name,
+      manager = if (is.null(input$mtg_new_filter_manager)) character(0) else input$mtg_new_filter_manager,
+      participant = if (is.null(input$mtg_new_filter_participant)) character(0) else input$mtg_new_filter_participant,
+      importance = if (is.null(input$mtg_new_filter_importance)) character(0) else input$mtg_new_filter_importance,
+      hospital = if (is.null(input$mtg_new_filter_hospital)) character(0) else input$mtg_new_filter_hospital,
+      include_archived = isTRUE(input$mtg_new_filter_include_archived),
+      combine_mode = {
+        v <- input$mtg_new_filter_combine_mode
+        if (is.null(v) || !v %in% c("and", "or")) "and" else v
+      }
+    )
+  })
+  meeting_new_filter_state_db <- debounce(meeting_new_filter_state, 400)
+
+  meeting_new_project_choices_filtered <- reactive({
+    st <- meeting_new_filter_state_db()
+    auth <- current_user_auth()
+    if (is.null(pg_con) || !DBI::dbIsValid(pg_con) || is.null(auth) || auth$allow_none) {
+      return(meeting_new_build_project_choices(pg_con, auth))
+    }
+    base <- meeting_new_build_project_choices(pg_con, auth)
+    ids <- meeting_new_project_ids_by_gantt_dims(
+      pg_con, auth,
+      st$type, st$name, st$manager, st$participant, st$importance, st$hospital,
+      st$include_archived, st$combine_mode
+    )
+    meeting_new_intersect_project_choices(base, ids)
   })
 
   # ---------- 会议决策数据查询 ----------
@@ -1347,7 +1387,7 @@ server <- function(input, output, session) {
     bundle <- gantt_sql_filter_bundle()
     if (!isTRUE(bundle$ok)) {
       if (identical(bundle$err, "no_db")) {
-        gantt_db_error("无法连接数据库，请检查 PG_HOST/PG_PORT/PG_DBNAME/PG_USER/PG_PASSWORD 或先启动数据库服务")
+      gantt_db_error("无法连接数据库，请检查 PG_HOST/PG_PORT/PG_DBNAME/PG_USER/PG_PASSWORD 或先启动数据库服务")
       }
       return(NULL)
     }
@@ -2589,17 +2629,17 @@ server <- function(input, output, session) {
         } else {
           stage_label_for_key(tk)
         }
-        remark_rows[[length(remark_rows) + 1L]] <- data.frame(
+            remark_rows[[length(remark_rows) + 1L]] <- data.frame(
           type = trimws(as.character(fb_proj$fb_type[j] %||% "")),
           updated_at = as.character(fb_proj$fb_updated[j] %||% ""),
           reporter = reporter,
           content = as.character(fb_proj$fb_content[j] %||% ""),
           stage_label = st_lab,
-          site_name = sn,
+              site_name = sn,
           fb_id = suppressWarnings(as.integer(fb_proj$id[j])),
           task_key_raw = tk,
-          stringsAsFactors = FALSE
-        )
+              stringsAsFactors = FALSE
+            )
       }
     }
     if (nrow(inst_act) > 0L) {
@@ -3702,7 +3742,7 @@ server <- function(input, output, session) {
         tags$div(
           style = "margin-bottom: 12px;",
           tags$div(style = "font-weight: 700; color: #37474f; margin-bottom: 6px; font-size: 13px;", bracket_lbl),
-          fluidRow(
+        fluidRow(
           column(
             3,
             selectizeInput(
@@ -3722,8 +3762,8 @@ server <- function(input, output, session) {
               rows = 3,
               placeholder = "留空则删除该条"
             )
+            )
           )
-        )
         )
       })
     } else {
@@ -4926,7 +4966,7 @@ server <- function(input, output, session) {
   })
 
   # ==================== 会议决策 renderUI ====================
-  # 外壳不依赖 meeting_filter_options，避免「从数据库刷新」时重置日期；选项由 meeting_filter_controls 单独刷新
+  # 历史会议：日期/且或/刷新在 meeting_history_filters（不依赖 meeting_filter_options，避免刷新选项时重置日期）；下拉选项在 meeting_filter_controls
 
   output$meeting_tab_ui <- renderUI({
     # 首屏默认「项目甘特图」：勿在首轮 flush 构建会议 Tab（含 meeting_filter_options / meeting_data 等），切到本 Tab 再渲染
@@ -4935,58 +4975,22 @@ server <- function(input, output, session) {
       ivd_perf_elapsed(t_ivd_sess0, "sess|output$meeting_tab_ui renderUI first")
       .ivd_sess_once$mtg_tab <- TRUE
     }
-    ed <- today_beijing()
-    st <- seq(ed, by = "-1 month", length.out = 4L)[4L]
     tagList(
       tags$div(
-        class = "gantt-row-flex",
-        tags$div(
-          id = "meeting_sidebar_col",
-          class = "gantt-sidebar-wrap",
-          tags$button(
-            type = "button",
-            id = "meeting_sidebar_toggle",
-            class = "btn btn-default btn-sm",
-            title = "收起筛选",
-            style = "width: 100%; margin-bottom: 10px; white-space: nowrap;",
-            "◀ 收起筛选"
-          ),
-          tags$div(
-            class = "gantt-sidebar-body",
-            tags$div(
-              class = "panel panel-default",
-              style = "margin-bottom: 8px;",
-              tags$div(class = "panel-heading", style = "padding: 8px 12px; font-size: 14px;", tags$b("筛选与刷新")),
-              tags$div(
-                class = "panel-body",
-                style = "padding: 10px 12px;",
-                tags$div(
-                  style = "display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;",
-                  actionButton("mtg_refresh", "🔄 从数据库刷新", class = "btn btn-primary", style = "margin: 0;"),
-                  tags$button(
-                    type = "button",
-                    id = "mtg_filter_combine_btn",
-                    class = "btn btn-default",
-                    style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
-                    `data-mode` = "and",
-                    "且条件"
-                  )
-                ),
-                dateInput("mtg_filter_date_start", "开始日期", value = st, width = "100%"),
-                dateInput("mtg_filter_date_end", "结束日期", value = ed, width = "100%"),
-                uiOutput("meeting_filter_controls")
-              )
+        class = "gantt-main-wrap",
+        style = "padding-left: 0;",
+        tabsetPanel(
+          id = "meeting_sub_tabs",
+          type = "tabs",
+          tabPanel(
+            "历史会议",
+            value = "mtg_history",
+            tagList(
+              uiOutput("meeting_history_filters"),
+              uiOutput("meeting_history_list")
             )
-          )
-        ),
-        tags$div(
-          class = "gantt-main-wrap",
-          tabsetPanel(
-            id = "meeting_sub_tabs",
-            type = "tabs",
-            tabPanel("历史会议", value = "mtg_history", uiOutput("meeting_history_ui")),
-            tabPanel("新建会议", value = "mtg_new", uiOutput("meeting_new_ui"))
-          )
+          ),
+          tabPanel("新建会议", value = "mtg_new", uiOutput("meeting_new_ui"))
         )
       )
     )
@@ -5005,8 +5009,38 @@ server <- function(input, output, session) {
     )
   })
 
-  # ---------- 历史会议 UI ----------
-  output$meeting_history_ui <- renderUI({
+  output$meeting_history_filters <- renderUI({
+    req(identical(input$main_tabs, "tab_meeting"))
+    ed <- today_beijing()
+    st <- seq(ed, by = "-1 month", length.out = 4L)[4L]
+    tags$div(
+      class = "panel panel-default",
+      style = "margin-bottom: 12px;",
+      tags$div(class = "panel-heading", style = "padding: 8px 12px; font-size: 14px;", tags$b("历史会议筛选与刷新")),
+      tags$div(
+        class = "panel-body",
+        style = "padding: 10px 12px;",
+        tags$div(
+          style = "display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;",
+          actionButton("mtg_refresh", "🔄 从数据库刷新", class = "btn btn-primary", style = "margin: 0;"),
+          tags$button(
+            type = "button",
+            id = "mtg_filter_combine_btn",
+            class = "btn btn-default",
+            style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
+            `data-mode` = "and",
+            "且条件"
+          )
+        ),
+        dateInput("mtg_filter_date_start", "开始日期", value = st, width = "100%"),
+        dateInput("mtg_filter_date_end", "结束日期", value = ed, width = "100%"),
+        uiOutput("meeting_filter_controls")
+      )
+    )
+  })
+
+  # ---------- 历史会议列表（筛选器在 meeting_history_filters，避免与 meeting_data 同块 render 导致控件被重建） ----------
+  output$meeting_history_list <- renderUI({
     req(identical(input$main_tabs, "tab_meeting"))
     meeting_data() # 依赖
     auth <- current_user_auth()
@@ -5140,10 +5174,11 @@ server <- function(input, output, session) {
               )
 
               person_unit <- if (is_current_user) {
-                actionLink(
-                  paste0("exec_status_", dec_id),
-                  label = HTML(lab_html),
-                  class = "meeting-exec-actionlink",
+                tags$a(
+                  id = paste0("exec_status_", dec_id),
+                  href = "javascript:void(0)",
+                  HTML(lab_html),
+                  class = "exec-status-link",
                   style = "font-size: 13px; cursor: pointer; text-decoration: none; white-space: normal;",
                   title = title_text
                 )
@@ -5179,7 +5214,7 @@ server <- function(input, output, session) {
               miss <- setdiff(need_cols, names(lf))
               if (length(miss) == 0L) {
                 fb_part <- lf[, need_cols, drop = FALSE]
-                flat <- meeting_new_flat_feedback_rows(fb_part)
+                flat <- meeting_new_flat_feedback_rows(fb_part, stage_label_fn = stage_label_for_key)
                 if (nrow(flat) > 0L) {
                   fb_sub <- tags$div(
                     style = "margin-bottom: 10px; font-size: 13px; line-height: 1.45; color: #333;",
@@ -5228,7 +5263,11 @@ server <- function(input, output, session) {
       tags$div(class = "meeting-panel",
         tags$div(class = "meeting-panel-heading",
           tags$span(paste0(mtg_name, "（", mtg_time_str, "）")),
-          actionButton(paste0("btn_edit_mtg_", first_id), "编辑", class = "btn btn-sm btn-default", style = "margin-left: 12px;")
+          tags$button(
+            type = "button", class = "btn btn-sm btn-default btn-edit-mtg", style = "margin-left: 12px;",
+            `data-mtg-id` = as.character(first_id),
+            "编辑"
+          )
         ),
         tags$div(class = "meeting-panel-body", proj_sections)
       )
@@ -5253,6 +5292,40 @@ server <- function(input, output, session) {
     tagList(
       tags$div(style = "max-width: 920px; margin: 0 auto; padding: 20px;",
         tags$h3("新建会议决策", style = "margin-top: 0;"),
+        tags$div(
+          class = "panel panel-default",
+          style = "margin-bottom: 16px;",
+          tags$div(class = "panel-heading", style = "padding: 8px 12px; font-size: 14px;", tags$b("筛选「选择项目」列表（与项目甘特图维度一致）")),
+          tags$div(
+            class = "panel-body",
+            style = "padding: 10px 12px;",
+            tags$div(
+              style = "display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;",
+              actionButton("mtg_new_dim_refresh", "刷新筛选项", class = "btn btn-default btn-sm", style = "margin: 0;"),
+              tags$button(
+                type = "button",
+                id = "mtg_new_filter_combine_btn",
+                class = "btn btn-default",
+                style = "font-size: 13px; padding: 5px 14px; line-height: 1.35; font-weight: 700; flex-shrink: 0; margin: 0;",
+                `data-mode` = "and",
+                "且条件"
+              )
+            ),
+            selectInput("mtg_new_filter_type", "项目类型", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+            selectInput("mtg_new_filter_name", "项目名称", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+            selectInput("mtg_new_filter_manager", "项目负责人", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+            selectInput("mtg_new_filter_participant", "项目参与人员", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+            selectInput("mtg_new_filter_importance", "重要紧急程度", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+            selectInput("mtg_new_filter_hospital", "相关医院（有中心）", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+            div(
+              style = "margin-top: 6px; font-size: 14px;",
+              checkboxInput("mtg_new_filter_include_archived", "包含已结题项目", value = FALSE)
+            ),
+            tags$p(style = "color:#888; font-size:12px; margin-top:8px; margin-bottom:0;",
+              "不选任何维度时显示全部可选项目；筛选与权限、甘特逻辑一致。"
+            )
+          )
+        ),
         tags$div(style = "display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap;",
           tags$div(style = "flex: 1; min-width: 200px;",
             textInput("mtg_new_name", "会议名称", value = "", width = "100%", placeholder = "输入会议名称...")
@@ -5302,8 +5375,8 @@ server <- function(input, output, session) {
       return(tags$p(style = "color:#888; margin-top: 12px;", "项目无效。"))
     }
     raw <- fetch_11_feedback_all_for_project_df(pg_con, pid)
-    flat <- meeting_new_flat_feedback_rows(raw)
-    tagList(
+    flat <- meeting_new_flat_feedback_rows(raw, stage_label_fn = stage_label_for_key)
+      tagList(
       tags$div(style = "margin-top: 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;",
         actionButton("mtg_btn_add_point_sheet", "添加要点", class = "btn btn-sm btn-default")
       ),
@@ -5340,11 +5413,11 @@ server <- function(input, output, session) {
   })
 
   observe({
-    meeting_force_refresh()
+    meeting_new_project_choices_filtered()
     auth <- current_user_auth()
     if (is.null(auth) || auth$allow_none) return()
     if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return()
-    ch <- meeting_new_build_project_choices(pg_con, auth)
+    ch <- meeting_new_project_choices_filtered()
     cur <- isolate(input$mtg_new_proj)
     updateSelectizeInput(session, "mtg_new_proj", choices = ch, selected = cur, server = FALSE)
   })
@@ -5478,7 +5551,7 @@ server <- function(input, output, session) {
         return(tags$p(style = "color:#c00;", "要点或项目无效。"))
       }
       raw <- fetch_11_feedback_all_for_project_df(pg_con, pid)
-      flat <- meeting_new_flat_feedback_rows(raw)
+      flat <- meeting_new_flat_feedback_rows(raw, stage_label_fn = stage_label_for_key)
       hit <- flat[flat$id == fid, , drop = FALSE]
       if (nrow(hit) == 0L) {
         return(tags$p(style = "color:#c00;", "该要点已不存在或已不属于当前项目。"))
@@ -5638,7 +5711,7 @@ server <- function(input, output, session) {
     pid <- suppressWarnings(as.integer(pvs))
     if (is.na(pid)) return()
     raw <- fetch_11_feedback_all_for_project_df(pg_con, pid)
-    flat <- meeting_new_flat_feedback_rows(raw)
+    flat <- meeting_new_flat_feedback_rows(raw, stage_label_fn = stage_label_for_key)
     if (!fid %in% flat$id) {
       showNotification("该要点已不属于当前所选项目，请刷新后重试", type = "warning")
       return()
@@ -5714,8 +5787,8 @@ server <- function(input, output, session) {
           fid0 <- meeting_new_pt_fb_id()
           if (is.na(actual_proj_id) || is.na(fid0) || fid0 < 1L) {
             showNotification("要点或项目信息已失效，请关闭弹窗后重新点击要点卡片", type = "warning")
-            return()
-          }
+      return()
+    }
           fb_int <- as.integer(fid0)
           chk <- check_meeting_feedback_matches_project(pg_con, fb_int, actual_proj_id)
           if (!is.na(chk)) {
@@ -5780,23 +5853,25 @@ server <- function(input, output, session) {
     meeting_force_refresh(meeting_force_refresh() + 1L)
   })
 
+  observeEvent(input$mtg_new_dim_refresh, {
+    meeting_force_refresh(meeting_force_refresh() + 1L)
+  }, ignoreInit = TRUE)
+
   # 点击执行人状态 -> 弹出修改模态框
-  # 动态注册（与甘特/汇总内嵌 exec_status_{id} 一致，需覆盖较大 id）
-  for (di in seq_len(5000L)) {
-    local({
-      ddi <- di
-      observeEvent(input[[paste0("exec_status_", ddi)]], {
+  # JS 事件委托替代 5000 个 observeEvent：前端统一设 input$exec_status_clicked，此处单一 observeEvent 处理
+  observeEvent(input$exec_status_clicked, {
+    raw <- input$exec_status_clicked
+    ddi <- as.integer(sub("_.*$", "", as.character(raw)))
+    if (is.na(ddi)) return
         if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return
         tryCatch({
           row <- DBI::dbGetQuery(pg_con,
             'SELECT id, "决策内容", "决策执行人及执行确认"::text AS "决策执行人及执行确认" FROM public."10会议决策表" WHERE id = $1',
-            params = list(ddi))
+        params = list(as.integer(ddi)))
           if (nrow(row) == 0) return
-          executor_modal_ctx(list(decision_id = ddi, content = row[["决策内容"]][1], executor_json = as.character(row[["决策执行人及执行确认"]][1])))
+      executor_modal_ctx(list(decision_id = as.integer(ddi), content = row[["决策内容"]][1], executor_json = as.character(row[["决策执行人及执行确认"]][1]), nonce = as.character(Sys.time())))
         }, error = function(e) {})
       }, ignoreInit = TRUE)
-    })
-  }
 
   # 执行状态修改模态框
   observeEvent(executor_modal_ctx(), {
@@ -5885,21 +5960,13 @@ server <- function(input, output, session) {
     })
   })
 
-  # 编辑会议（弹出模态框）
-  observeEvent(input$btn_edit_mtg_1, { .show_edit_meeting_modal(1) })
-  observeEvent(input$btn_edit_mtg_2, { .show_edit_meeting_modal(2) })
-  observeEvent(input$btn_edit_mtg_3, { .show_edit_meeting_modal(3) })
-  observeEvent(input$btn_edit_mtg_4, { .show_edit_meeting_modal(4) })
-  observeEvent(input$btn_edit_mtg_5, { .show_edit_meeting_modal(5) })
-  # 动态处理大于5的编辑按钮（原 6:500 → 6:100；实际会议决策 id 不会超过 100 条）
-  for (ei in 6:100) {
-    local({
-      eei <- ei
-      observeEvent(input[[paste0("btn_edit_mtg_", eei)]], {
-        .show_edit_meeting_modal(eei)
+  # 编辑会议（弹出模态框）— JS 事件委托，替代 100 个 observeEvent
+  observeEvent(input$mtg_edit_clicked, {
+    raw <- input$mtg_edit_clicked
+    if (is.null(raw) || is.na(raw)) return
+    id <- as.integer(sub("_.*$", "", as.character(raw)))
+    if (!is.na(id)) .show_edit_meeting_modal(id)
       }, ignoreInit = TRUE)
-    })
-  }
 
   .show_edit_meeting_modal <- function(first_id) {
     if (is.null(pg_con) || !DBI::dbIsValid(pg_con)) return
@@ -5961,8 +6028,8 @@ server <- function(input, output, session) {
           selectizeInput(
             paste0("edit_mtg_proj_", rid),
             label = if (n_dec == 1L) "选择项目" else sprintf("项目区块 %d", ri),
-            choices = project_choices,
-            selected = sel_val,
+              choices = project_choices,
+              selected = sel_val,
             width = "100%",
             options = list(placeholder = "共性决策 或 具体项目…")
           ),
@@ -6027,7 +6094,7 @@ server <- function(input, output, session) {
               return(tags$p(style = "color:#888;", "项目无效。"))
             }
             raw <- fetch_11_feedback_all_for_project_df(pg_con, pid)
-            flat <- meeting_new_flat_feedback_rows(raw)
+            flat <- meeting_new_flat_feedback_rows(raw, stage_label_fn = stage_label_for_key)
             if (nrow(flat) == 0L) {
               return(tags$p(style = "color:#999;", "（本项目暂无已登记要点）"))
             }
@@ -6074,10 +6141,10 @@ server <- function(input, output, session) {
           )),
           tags$div(style = "display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap;",
             tags$div(style = "flex: 1; min-width: 200px;",
-              textInput("edit_mtg_name", "会议名称", value = mtg_name, width = "100%")
-            ),
-            tags$div(style = "width: 200px;",
-              textInput("edit_mtg_time", "会议时间",
+            textInput("edit_mtg_name", "会议名称", value = mtg_name, width = "100%")
+          ),
+          tags$div(style = "width: 200px;",
+            textInput("edit_mtg_time", "会议时间",
                 value = if (is.na(mtg_time)) "" else format(mtg_time, "%Y-%m-%d %H:%M", tz = APP_TZ_CN),
                 width = "100%", placeholder = "YYYY-MM-DD HH:MM")
             )

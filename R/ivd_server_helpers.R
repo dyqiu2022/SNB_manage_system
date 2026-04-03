@@ -239,10 +239,11 @@ gantt_executor_block_tags <- function(auth, dec_id, executor_json, allow_exec_li
     )
 
     person_unit <- if (is_current_user) {
-      actionLink(
-        paste0("exec_status_", dec_id),
-        label = HTML(lab_html),
-        class = "meeting-exec-actionlink",
+      tags$a(
+        id = paste0("exec_status_", dec_id),
+        href = "javascript:void(0)",
+        HTML(lab_html),
+        class = "exec-status-link",
         style = "font-size: 13px; cursor: pointer; text-decoration: none; white-space: normal;",
         title = title_text
       )
@@ -1484,7 +1485,7 @@ feedback_all_proj_df_to_display <- function(fb_df) {
     }, error = function(e) character(0))
     reps <- unique(trimws(reps[nzchar(trimws(reps))]))
     reporter <- paste(reps, collapse = "、")
-    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else stage_label_for_key(tk)
+    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else if (!is.null(stage_label_fn) && is.function(stage_label_fn)) stage_label_fn(tk) else sub("^S\\d+_?", "", as.character(tk %||% ""))
     typ <- trimws(as.character(fb_df$fb_type[j] %||% ""))
     cont <- as.character(fb_df$fb_content[j] %||% "")
     uid <- suppressWarnings(as.integer(fb_df$id[j]))
@@ -1542,7 +1543,7 @@ feedback_all_proj_df_to_display <- function(fb_df) {
 }
 
 # 新建会议主列表：按登记时间（created_at）降序，扁平一行一条（不分类型版块）
-meeting_new_flat_feedback_rows <- function(fb_df) {
+meeting_new_flat_feedback_rows <- function(fb_df, stage_label_fn = NULL) {
   empty <- data.frame(
     id = integer(0), stage_label = character(0), site_name = character(0),
     task_key_raw = character(0),
@@ -1564,7 +1565,7 @@ meeting_new_flat_feedback_rows <- function(fb_df) {
     reps <- unique(trimws(reps[nzchar(trimws(reps))]))
     reporter <- paste(reps, collapse = "、")
     if (!nzchar(reporter)) reporter <- "（无）"
-    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else stage_label_for_key(tk)
+    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else if (!is.null(stage_label_fn) && is.function(stage_label_fn)) stage_label_fn(tk) else sub("^S\\d+_?", "", as.character(tk %||% ""))
     typ <- trimws(as.character(fb_df$fb_type[j] %||% ""))
     cont <- as.character(fb_df$fb_content[j] %||% "")
     uid <- suppressWarnings(as.integer(fb_df$id[j]))
@@ -1620,6 +1621,114 @@ meeting_new_build_project_choices <- function(conn, auth) {
     if (nrow(pdf) > 0) project_choices <- c(project_choices, setNames(as.character(pdf$id), pdf[["项目名称"]]))
   }, error = function(e) {})
   project_choices
+}
+
+#' 与甘特侧栏相同的维度 distinct 选项（按 04 与权限裁剪）
+fetch_gantt_dim_filter_options <- function(conn, auth) {
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(NULL)
+  if (is.null(auth) || isTRUE(auth$allow_none)) {
+    return(list(
+      types = character(0), names = character(0), managers = character(0),
+      participants = character(0), importance = character(0), hospitals = character(0)
+    ))
+  }
+  and_04 <- if (auth$allow_all) "" else paste0(" AND id IN (", auth$allowed_subquery, ")")
+  and_g  <- if (auth$allow_all) "" else paste0(" AND g.id IN (", auth$allowed_subquery, ")")
+  and_m  <- if (auth$allow_all) "" else paste0(" AND m.\"04项目总表_id\" IN (", auth$allowed_subquery, ")")
+  and_s  <- if (auth$allow_all) "" else paste0(" AND s.\"project_table 项目总表_id\" IN (", auth$allowed_subquery, ")")
+  tryCatch({
+    types <- character(0)
+    names_ <- character(0)
+    managers <- character(0)
+    participants <- character(0)
+    importance <- character(0)
+    hospitals <- character(0)
+    t1 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "项目类型" AS v FROM public."04项目总表" WHERE "项目类型" IS NOT NULL', and_04, " ORDER BY 1"))
+    if (nrow(t1) > 0) types <- as.character(t1$v)
+    t2 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "项目名称" AS v FROM public."04项目总表" WHERE "项目名称" IS NOT NULL', and_04, " ORDER BY 1"))
+    if (nrow(t2) > 0) names_ <- as.character(t2$v)
+    t3 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT p."姓名" AS v FROM public."05人员表" p INNER JOIN public."04项目总表" g ON g."05人员表_id" = p.id WHERE g."05人员表_id" IS NOT NULL', and_g, " ORDER BY 1"))
+    if (nrow(t3) > 0) managers <- as.character(t3$v)
+    t4 <- tryCatch(
+      DBI::dbGetQuery(conn, paste0('SELECT DISTINCT p."姓名" AS v FROM public."05人员表" p INNER JOIN public."_nc_m2m_04项目总表_05人员表" m ON m."05人员表_id" = p.id WHERE 1=1', and_m, " ORDER BY 1")),
+      error = function(e) data.frame(v = character(0))
+    )
+    if (nrow(t4) > 0) participants <- as.character(t4$v)
+    t5 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "重要紧急程度" AS v FROM public."04项目总表" WHERE "重要紧急程度" IS NOT NULL', and_04, " ORDER BY 1"))
+    if (nrow(t5) > 0) importance <- as.character(t5$v)
+    t6 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT h."医院名称" AS v FROM public."01医院信息表" h INNER JOIN public."03医院_项目表" s ON s."01_hos_resource_table医院信息表_id" = h.id WHERE h."医院名称" IS NOT NULL', and_s, " ORDER BY 1"))
+    if (nrow(t6) > 0) hospitals <- as.character(t6$v)
+    list(
+      types = types,
+      names = names_,
+      managers = managers,
+      participants = participants,
+      importance = importance,
+      hospitals = hospitals
+    )
+  }, error = function(e) NULL)
+}
+
+#' 按甘特相同维度在 v_项目阶段甘特视图_全部 上筛出 04 项目 id；无维度子句时返回 NULL（调用方用全量 choices）
+meeting_new_project_ids_by_gantt_dims <- function(
+    conn, auth,
+    ft, fn, fm, fp, fi, fh,
+    include_archived,
+    combine_mode = c("and", "or")) {
+  combine_mode <- match.arg(combine_mode)
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(integer(0))
+  if (is.null(auth) || isTRUE(auth$allow_none)) return(integer(0))
+  manager_ids <- integer(0)
+  if (length(fm) > 0L) {
+    qm <- paste0('SELECT id FROM public."05人员表" WHERE "姓名" IN (', paste(rep("$", length(fm)), seq_along(fm), sep = "", collapse = ","), ")")
+    manager_ids <- DBI::dbGetQuery(conn, qm, params = as.list(fm))$id
+  }
+  proj_ids_participant <- integer(0)
+  if (length(fp) > 0L) {
+    qp <- paste0('SELECT id FROM public."05人员表" WHERE "姓名" IN (', paste(rep("$", length(fp)), seq_along(fp), sep = "", collapse = ","), ")")
+    pid_p <- DBI::dbGetQuery(conn, qp, params = as.list(fp))$id
+    if (length(pid_p) > 0L) {
+      qp2 <- paste0('SELECT DISTINCT "04项目总表_id" FROM public."_nc_m2m_04项目总表_05人员表" WHERE "05人员表_id" IN (', paste(rep("$", length(pid_p)), seq_along(pid_p), sep = "", collapse = ","), ")")
+      proj_ids_participant <- DBI::dbGetQuery(conn, qp2, params = as.list(pid_p))[["04项目总表_id"]]
+    }
+  }
+  proj_ids_hosp <- integer(0)
+  if (length(fh) > 0L) {
+    qh <- paste0('SELECT DISTINCT s."project_table 项目总表_id" FROM public."03医院_项目表" s INNER JOIN public."01医院信息表" h ON s."01_hos_resource_table医院信息表_id" = h.id WHERE h."医院名称" IN (', paste(rep("$", length(fh)), seq_along(fh), sep = "", collapse = ","), ")")
+    proj_ids_hosp <- DBI::dbGetQuery(conn, qh, params = as.list(fh))[["project_table 项目总表_id"]]
+  }
+  dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp)
+  if (length(dim_built$dim_parts) == 0L) return(NULL)
+  include_archived_sql <- if (isTRUE(include_archived)) "TRUE" else "COALESCE(g.project_is_active, true) = true"
+  auth_sql <- if (auth$allow_all) {
+    "TRUE"
+  } else {
+    paste0("g.proj_row_id IN (", auth$allowed_subquery, ")")
+  }
+  dim_sql <- if (identical(combine_mode, "or")) {
+    paste0("(", paste(dim_built$dim_parts, collapse = " OR "), ")")
+  } else {
+    paste(dim_built$dim_parts, collapse = " AND ")
+  }
+  q <- paste0(
+    'SELECT DISTINCT g.proj_row_id::bigint AS id FROM public."v_项目阶段甘特视图_全部" g WHERE ',
+    include_archived_sql, " AND (", auth_sql, ") AND (", dim_sql, ") AND g.proj_row_id IS NOT NULL"
+  )
+  res <- DBI::dbGetQuery(conn, q, params = dim_built$params_stage)
+  if (is.null(res) || nrow(res) == 0L) return(integer(0))
+  as.integer(res$id)
+}
+
+#' 在 meeting_new_build_project_choices 结果上按 id 列表保留「共性决策」+ 匹配项目
+meeting_new_intersect_project_choices <- function(base_choices, allowed_ids) {
+  if (is.null(allowed_ids)) return(base_choices)
+  bc <- base_choices
+  if (length(allowed_ids) == 0L) {
+    return(bc[names(bc) == "共性决策" | as.character(bc) == "__common__"])
+  }
+  idset <- as.character(allowed_ids)
+  keep <- names(bc) == "共性决策" | as.character(bc) %in% c("__common__", idset)
+  bc[keep]
 }
 
 meeting_feedback_id_choices <- function(flat) {
