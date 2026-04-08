@@ -30,8 +30,9 @@ Nginx 通过 HTTP header `X-USER` 传递已认证用户身份。
 
 ### 部署架构
 - **WSL** 构建 Docker 镜像 → `docker save` → `cp` 到 `/mnt/c/IVD_Project/` → Windows 端 `docker.exe load` → `docker.exe compose up -d`
+- 所有镜像 tag 统一使用 `YYYY_mm_dd_HH_MM` 时间戳格式（如 `2026_04_03_10_30`），每次部署自动生成，不重用旧 tag
 - `Dockerfile.update` 基于已有镜像增量更新（`FROM ivd_shiny:20260305`），只 COPY app.R
-- 4 个 `app-shiny` 容器共享同一镜像 `ivd_shiny:20260331`，Nginx 轮询负载均衡
+- 4 个 `app-shiny` 容器共享同一镜像，Nginx 轮询负载均衡
 
 ## 开发规范
 
@@ -46,12 +47,26 @@ docker.exe logs ivd_project-app-shiny-4-1 --tail 20
 不能只看一个容器，因为 Nginx 轮询分发请求，错误可能出现在任何一个容器中。
 
 ### 部署流程
-1. `docker build -f Dockerfile.update -t ivd_shiny:20260331 .`
-2. `docker save ivd_shiny:20260331 -o /tmp/ivd_shiny_20260331.tar`
-3. `cp /tmp/ivd_shiny_20260331.tar /mnt/c/IVD_Project/`
-4. `docker.exe load -i C:\\IVD_Project\\ivd_shiny_20260331.tar`
-5. `docker.exe compose -f C:\\IVD_Project\\docker-compose.yml up -d app-shiny-1 app-shiny-2 app-shiny-3 app-shiny-4`
-6. 等 8 秒后检查全部 4 个容器日志
+
+所有镜像（ivd_shiny、ivd_maintain_shiny 等）统一使用 `YYYY_mm_dd_HH_MM` 时间戳作为 tag，每次部署自动生成：
+
+**app-shiny 部署：**
+1. `TAG=$(date +%Y_%m_%d_%H_%M)`
+2. `docker build --no-cache -f Dockerfile.update -t ivd_shiny:$TAG .`
+3. `docker save ivd_shiny:$TAG -o /tmp/ivd_shiny_$TAG.tar && cp /tmp/ivd_shiny_$TAG.tar /mnt/c/IVD_Project/`
+4. 更新 `/mnt/c/IVD_Project/docker-compose.yml` 中 4 个 app-shiny 容器的 `image: ivd_shiny:$TAG`
+5. `docker.exe load -i C:\\IVD_Project\\ivd_shiny_$TAG.tar`
+6. `docker.exe compose -f C:\\IVD_Project\\docker-compose.yml up -d --force-recreate app-shiny-1 app-shiny-2 app-shiny-3 app-shiny-4`
+7. 等 8 秒后检查全部 4 个容器日志
+
+**maintain-shiny 部署：**
+1. `TAG=$(date +%Y_%m_%d_%H_%M)`
+2. `docker build --no-cache -f Dockerfile.maintain -t ivd_maintain_shiny:$TAG .`
+3. `docker save ivd_maintain_shiny:$TAG -o /tmp/ivd_maintain_shiny_$TAG.tar && cp /tmp/ivd_maintain_shiny_$TAG.tar /mnt/c/IVD_Project/`
+4. 更新 `/mnt/c/IVD_Project/docker-compose.yml` 中 2 个 maintain-shiny 容器的 `image: ivd_maintain_shiny:$TAG`
+5. `docker.exe load -i C:\\IVD_Project\\ivd_maintain_shiny_$TAG.tar`
+6. `docker.exe compose -f C:\\IVD_Project\\docker-compose.yml up -d --force-recreate maintain-shiny-1 maintain-shiny-2`
+7. 等 8 秒后检查 2 个 maintain 容器日志
 
 ### Shiny 性能：禁止批量创建 observeEvent / output 闭包
 
@@ -108,3 +123,26 @@ observeEvent(input$your_unified_input, {
 - 执行人从 `05人员表` 全体在职人员中选择
 - 执行状态存储在 `决策执行人及执行确认` json 列：`{"姓名-工号": {"状态": "未执行/已执行", "说明": "..."}}`
 - 当前用户可点击自己的执行人标签修改状态
+
+### 甘特图滚动位置保持机制（切勿破坏）
+
+**背景**：vis-timeline 的 `itemsData.clear() + add()` 会重建 DOM，导致纵向滚动位置重置。用户在甘特图内编辑保存后，期望滚动位置不变。
+
+**两种更新模式**：
+| 触发来源 | 模式 | 行为 |
+|---------|------|------|
+| 筛选器变化（类型/名称/负责人/参与人/医院等） | `full` | `itemsData.clear() + add()` 完全重建，正确移除被过滤掉的组和条目 |
+| 用户交互保存（编辑阶段、保存进度、保存贡献者等 12 处 `btn_save_*`） | `incremental` | `itemsData.update()` 增量更新，保留滚动位置 |
+
+**实现手段（JS 猴子补丁）**：
+1. 前端在 `tags$script` 中对 timevis widget 的 `setItems`/`setGroups` 做 monkey-patch
+2. JS 全局变量 `_updateMode` 控制 `'full'` 或 `'incremental'`
+3. R 端 `gantt_use_incremental` reactiveVal 标记当前更新来源
+4. `gantt_sql_filter_bundle` observe 中读取该标记，通过 `session$sendCustomMessage("ganttSetUpdateMode", mode)` 切换 JS 端模式
+5. 随后调用 `setItems()`/`setGroups()`（timevis 原生 proxy），被猴子补丁拦截并根据模式选择更新方式
+
+**关键约束（勿改）**：
+- **必须**用 `setItems`/`setGroups`（timevis 原生 proxy），不能用自定义 `sendCustomMessage` 替代——绕过 timevis 内部消息路由会破坏筛选器耦合和会议页面选项
+- `gantt_filter_state` **不能**包含 `gantt_force_refresh()`——否则 debounce 400ms 后会触发第二次 full 模式更新，覆盖 incremental 模式的滚动保持效果
+- 所有用户交互保存点（12 处 `gantt_use_incremental(TRUE)` + `gantt_force_refresh(+1)`）必须在同一行成对出现
+- 猴子补丁中 ID 比较必须用 `String()` 统一类型，否则 `indexOf` 严格等于判断失败导致组无法正确移除

@@ -127,6 +127,37 @@ parse_executor_json <- function(json_text) {
   }, error = function(e) data.frame(key = character(0), 状态 = character(0), 说明 = character(0), stringsAsFactors = FALSE))
 }
 
+# 获取指定项目的参与人员+项目负责人（姓名-工号去重并集）
+# 返回 named character vector：names = "姓名-工号", values = 05人员表.id
+project_member_choices <- function(conn, project_ids) {
+  pids <- unique(suppressWarnings(as.integer(project_ids)))
+  pids <- pids[!is.na(pids)]
+  if (length(pids) == 0L) return(character(0))
+  tryCatch({
+    ph <- DBI::dbGetQuery(conn, 'SELECT id, "姓名", "工号" FROM public."05人员表" WHERE "人员状态" = \'在职\' ORDER BY "姓名"')
+    if (is.null(ph) || nrow(ph) == 0L) return(character(0))
+    member_ids <- integer(0)
+    for (pid in pids) {
+      # 负责人
+      mgr <- DBI::dbGetQuery(conn,
+        'SELECT "05人员表_id" AS mid FROM public."04项目总表" WHERE id = $1',
+        params = list(pid))
+      if (nrow(mgr) > 0L && !is.na(mgr$mid[1L])) member_ids <- c(member_ids, as.integer(mgr$mid[1L]))
+      # 参与人员
+      parts <- DBI::dbGetQuery(conn,
+        'SELECT "05人员表_id" AS mid FROM public."_nc_m2m_04项目总表_05人员表" WHERE "04项目总表_id" = $1',
+        params = list(pid))
+      if (nrow(parts) > 0L) member_ids <- c(member_ids, as.integer(parts$mid))
+    }
+    member_ids <- unique(member_ids)
+    if (length(member_ids) == 0L) return(character(0))
+    sub <- ph[ph$id %in% member_ids, , drop = FALSE]
+    if (nrow(sub) == 0L) return(character(0))
+    labs <- paste0(sub[["姓名"]], "-", sub[["工号"]])
+    setNames(as.character(sub$id), labs)
+  }, error = function(e) character(0))
+}
+
 # 执行人 JSON 键为「姓名-工号」：界面只展示姓名（工号仅用于库内防重名）
 executor_display_name_from_key <- function(key) {
   k <- trimws(as.character(key %||% ""))
@@ -1422,6 +1453,88 @@ insert_project_scope_feedback_11 <- function(conn, project_id, entry_key, type_,
   invisible(NULL)
 }
 
+# 获取项目级要点（09 IS NULL）列表
+fetch_project_scope_feedback_11 <- function(conn, project_id) {
+  pid <- suppressWarnings(as.integer(project_id))
+  if (is.null(conn) || !DBI::dbIsValid(conn) || is.na(pid)) return(empty_remark_df())
+  df <- tryCatch(
+    DBI::dbGetQuery(conn,
+      'SELECT id AS fb_row_id, "条目键", "类型", "内容", "更新日期", reporters_json::text AS rj
+       FROM public."11阶段问题反馈表"
+       WHERE "04项目总表_id" = $1 AND "09项目阶段实例表_id" IS NULL
+       ORDER BY id',
+      params = list(pid)),
+    error = function(e) data.frame()
+  )
+  if (is.null(df) || nrow(df) == 0L) return(empty_remark_df())
+  rows <- lapply(seq_len(nrow(df)), function(i) {
+    rj <- df[["rj"]][i]
+    reps <- tryCatch({
+      jj <- jsonlite::fromJSON(rj, simplifyVector = TRUE)
+      if (is.null(jj)) character(0) else as.character(jj)
+    }, error = function(e) character(0))
+    reps <- unique(trimws(reps[nzchar(trimws(reps))]))
+    reporter <- paste(reps, collapse = "、")
+    data.frame(
+      entry_key = as.character(df[["条目键"]][i]),
+      reporter = reporter,
+      updated_at = as.character(df[["更新日期"]][i] %||% ""),
+      type = as.character(df[["类型"]][i] %||% ""),
+      content = as.character(df[["内容"]][i] %||% ""),
+      fb_id = suppressWarnings(as.integer(df[["fb_row_id"]][i])),
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+# 合并项目级要点（upsert + delete）
+apply_merged_project_scope_feedback_11 <- function(conn, project_id, merged_named_list, actor_work_id, actor_name) {
+  pid <- suppressWarnings(as.integer(project_id))
+  if (is.na(pid)) return(invisible(NULL))
+  merged_named_list <- merged_named_list %||% list()
+  db_keys <- tryCatch({
+    r <- DBI::dbGetQuery(conn,
+      'SELECT "条目键" FROM public."11阶段问题反馈表" WHERE "04项目总表_id" = $1 AND "09项目阶段实例表_id" IS NULL',
+      params = list(pid))
+    if (is.null(r) || nrow(r) == 0L) character(0) else as.character(r[[1]])
+  }, error = function(e) character(0))
+  merged_keys <- names(merged_named_list)
+  to_del <- setdiff(db_keys, merged_keys)
+  for (k in to_del) {
+    DBI::dbExecute(conn,
+      'DELETE FROM public."11阶段问题反馈表" WHERE "04项目总表_id" = $1 AND "09项目阶段实例表_id" IS NULL AND "条目键" = $2',
+      params = list(pid, k))
+  }
+  aw <- as.character(actor_work_id %||% "")[1]
+  an <- as.character(actor_name %||% "")[1]
+  for (key in merged_keys) {
+    val <- merged_named_list[[key]]
+    if (is.null(val)) next
+    core <- remark_core_state(val)
+    rj <- jsonlite::toJSON(as.list(unique(core$reporters[nzchar(core$reporters)])), auto_unbox = TRUE)
+    DBI::dbExecute(conn,
+      'INSERT INTO public."11阶段问题反馈表" (
+        "09项目阶段实例表_id", "04项目总表_id", "条目键", entry_key_legacy,
+        "类型", "内容", reporters_json, "更新日期",
+        updated_at, updated_by_work_id, updated_by_name
+      ) VALUES (
+        NULL, $1, $2, $2, $3, $4, $5::jsonb, $6, CURRENT_TIMESTAMP, $7, $8
+      )
+      ON CONFLICT ("04项目总表_id", "条目键") WHERE ("09项目阶段实例表_id" IS NULL)
+      DO UPDATE SET
+        "类型" = EXCLUDED."类型",
+        "内容" = EXCLUDED."内容",
+        reporters_json = EXCLUDED.reporters_json,
+        "更新日期" = EXCLUDED."更新日期",
+        updated_at = EXCLUDED.updated_at,
+        updated_by_work_id = EXCLUDED.updated_by_work_id,
+        updated_by_name = EXCLUDED.updated_by_name',
+      params = list(pid, key, core$type, core$content, as.character(rj), core$updated_at, aw, an))
+  }
+  invisible(NULL)
+}
+
 # 某项目下全部 11 行（含阶段内 + 项目级），供会议「项目要点」弹窗与展示
 fetch_11_feedback_all_for_project_df <- function(conn, project_id) {
   pid <- suppressWarnings(as.integer(project_id))
@@ -1431,6 +1544,7 @@ fetch_11_feedback_all_for_project_df <- function(conn, project_id) {
       fb_updated = character(0), fb_rj = character(0),
       task_key_raw = character(0), site_name = character(0),
       fb_created = as.POSIXct(character(0)),
+      task_display_name = character(0),
       stringsAsFactors = FALSE
     ))
   }
@@ -1445,7 +1559,9 @@ fetch_11_feedback_all_for_project_df <- function(conn, project_id) {
               CASE WHEN f."09项目阶段实例表_id" IS NULL THEN \'__project_scope__\' ELSE d.stage_key END AS task_key_raw,
               CASE WHEN f."09项目阶段实例表_id" IS NULL THEN \'（不分中心/阶段）\'
                    WHEN d.stage_scope = \'sync\' THEN \'所有中心（同步）\'
-                   ELSE COALESCE(NULLIF(h."医院名称", \'\'), \'中心-\' || COALESCE(s.id, 0)::text) END AS site_name
+                   ELSE COALESCE(NULLIF(h."医院名称", \'\'), \'中心-\' || COALESCE(s.id, 0)::text) END AS site_name,
+              CASE WHEN f."09项目阶段实例表_id" IS NULL THEN NULL
+                   ELSE COALESCE(si."阶段实例自定义名称", d.stage_name) END AS task_display_name
        FROM public."11阶段问题反馈表" f
        LEFT JOIN public."09项目阶段实例表" si ON si.id = f."09项目阶段实例表_id"
        LEFT JOIN public."08项目阶段定义表" d ON d.id = si.stage_def_id
@@ -1460,6 +1576,7 @@ fetch_11_feedback_all_for_project_df <- function(conn, project_id) {
       fb_updated = character(0), fb_rj = character(0),
       task_key_raw = character(0), site_name = character(0),
       fb_created = as.POSIXct(character(0)),
+      task_display_name = character(0),
       stringsAsFactors = FALSE
     )
   })
@@ -1485,7 +1602,12 @@ feedback_all_proj_df_to_display <- function(fb_df) {
     }, error = function(e) character(0))
     reps <- unique(trimws(reps[nzchar(trimws(reps))]))
     reporter <- paste(reps, collapse = "、")
-    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else if (!is.null(stage_label_fn) && is.function(stage_label_fn)) stage_label_fn(tk) else sub("^S\\d+_?", "", as.character(tk %||% ""))
+    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else {
+      dn_col <- if ("task_display_name" %in% names(fb_df)) as.character(fb_df$task_display_name[j]) else NA_character_
+      if (!is.na(dn_col) && nzchar(dn_col)) dn_col
+      else if (!is.null(stage_label_fn) && is.function(stage_label_fn)) stage_label_fn(tk)
+      else sub("^S\\d+_?", "", as.character(tk %||% ""))
+    }
     typ <- trimws(as.character(fb_df$fb_type[j] %||% ""))
     cont <- as.character(fb_df$fb_content[j] %||% "")
     uid <- suppressWarnings(as.integer(fb_df$id[j]))
@@ -1565,7 +1687,12 @@ meeting_new_flat_feedback_rows <- function(fb_df, stage_label_fn = NULL) {
     reps <- unique(trimws(reps[nzchar(trimws(reps))]))
     reporter <- paste(reps, collapse = "、")
     if (!nzchar(reporter)) reporter <- "（无）"
-    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else if (!is.null(stage_label_fn) && is.function(stage_label_fn)) stage_label_fn(tk) else sub("^S\\d+_?", "", as.character(tk %||% ""))
+    st_lab <- if (identical(tk, "__project_scope__")) "项目要点" else {
+      dn_col <- if ("task_display_name" %in% names(fb_df)) as.character(fb_df$task_display_name[j]) else NA_character_
+      if (!is.na(dn_col) && nzchar(dn_col)) dn_col
+      else if (!is.null(stage_label_fn) && is.function(stage_label_fn)) stage_label_fn(tk)
+      else sub("^S\\d+_?", "", as.character(tk %||% ""))
+    }
     typ <- trimws(as.character(fb_df$fb_type[j] %||% ""))
     cont <- as.character(fb_df$fb_content[j] %||% "")
     uid <- suppressWarnings(as.integer(fb_df$id[j]))

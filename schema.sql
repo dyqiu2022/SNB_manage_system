@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ged8a21uCeRbdKRK3dn6EDOYgTxsawyA00asyCg6sscemvM4dSHa7xDYs19vAG0
+\restrict 514gIEbOE4PyTgI1p6lLceCYidXOA7WCBk8xEvStUtqbMPnt8SHHqP9hzhwam5q
 
 -- Dumped from database version 15.15 (Debian 15.15-1.pgdg13+1)
 -- Dumped by pg_dump version 15.15 (Debian 15.15-1.pgdg13+1)
@@ -550,6 +550,7 @@ CREATE TABLE public."09项目阶段实例表" (
     updated_by_name text,
     is_active boolean,
     actual_start_date date,
+    "阶段实例自定义名称" text,
     CONSTRAINT "09项目阶段实例表_progress_check" CHECK (((progress >= 0) AND (progress <= 100)))
 );
 
@@ -2738,7 +2739,7 @@ CREATE VIEW public."v_项目阶段甘特视图" AS
             ELSE COALESCE(NULLIF(h."医院名称", ''::text), ('中心-'::text || (COALESCE(s.id, 0))::text))
         END AS site_name,
     d.stage_key AS task_name,
-    d.stage_name AS task_display_name,
+    COALESCE(si."阶段实例自定义名称", d.stage_name) AS task_display_name,
     d.stage_order AS stage_ord,
     d.stage_scope,
     'Process'::text AS task_type,
@@ -2786,7 +2787,7 @@ CREATE VIEW public."v_项目阶段甘特视图_全部" AS
             ELSE COALESCE(NULLIF(h."医院名称", ''::text), ('中心-'::text || (COALESCE(s.id, 0))::text))
         END AS site_name,
     d.stage_key AS task_name,
-    d.stage_name AS task_display_name,
+    COALESCE(si."阶段实例自定义名称", d.stage_name) AS task_display_name,
     d.stage_order AS stage_ord,
     d.stage_scope,
     'Process'::text AS task_type,
@@ -6331,5 +6332,5 @@ ALTER TABLE ONLY public."03医院_项目表"
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ged8a21uCeRbdKRK3dn6EDOYgTxsawyA00asyCg6sscemvM4dSHa7xDYs19vAG0
+\unrestrict 514gIEbOE4PyTgI1p6lLceCYidXOA7WCBk8xEvStUtqbMPnt8SHHqP9hzhwam5q
 
