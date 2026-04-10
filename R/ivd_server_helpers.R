@@ -2239,3 +2239,608 @@ validate_date_input <- function(x) {
   if (is.na(d)) return(list(ok = FALSE, value = NA))
   list(ok = TRUE, value = d)
 }
+
+# ---------- 个人消息 Tab ----------
+
+.empty_msg_df <- function() {
+  data.frame(
+    category = character(0),
+    priority = character(0),
+    project_name = character(0),
+    stage_name = character(0),
+    message_text = character(0),
+    related_date = as.Date(character(0)),
+    days_value = integer(0),
+    sort_key = numeric(0),
+    project_type = character(0),
+    importance = character(0),
+    manager_name = character(0),
+    project_db_id = integer(0),
+    stage_instance_id = integer(0),
+    task_key = character(0),
+    feedback_id = integer(0),
+    decision_id = integer(0),
+    executor_json = character(0),
+    stringsAsFactors = FALSE
+  )
+}
+
+# M1/M5/M6/M7/M8：阶段相关消息（合并为一条 SQL）
+.fetch_stage_personal_msgs <- function(conn, and_auth, today) {
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(.empty_msg_df())
+  q <- paste0("
+    SELECT g.\"项目名称\", g.id AS project_db_id,
+           si.id AS stage_instance_id, d.stage_key AS task_key,
+           g.\"项目类型\", g.\"重要紧急程度\",
+           p.\"姓名\" AS manager_name,
+           COALESCE(si.\"阶段实例自定义名称\", d.stage_name) AS stage_name,
+           si.planned_start_date, si.planned_end_date,
+           si.actual_start_date, si.actual_end_date,
+           si.progress, si.updated_at,
+           CURRENT_DATE - si.planned_end_date AS days_overdue,
+           si.planned_end_date - CURRENT_DATE AS days_remaining,
+           CURRENT_DATE - si.planned_start_date AS days_late,
+           CURRENT_DATE - COALESCE(si.updated_at::date, si.planned_start_date) AS days_stale,
+           CASE
+             WHEN si.actual_start_date IS NOT NULL THEN
+               (CURRENT_DATE - si.actual_start_date)::numeric /
+               NULLIF((si.planned_end_date - si.planned_start_date)::numeric, 0)
+             WHEN si.planned_start_date <= CURRENT_DATE THEN
+               (CURRENT_DATE - si.planned_start_date)::numeric /
+               NULLIF((si.planned_end_date - si.planned_start_date)::numeric, 0)
+             ELSE 0
+           END AS planned_progress
+    FROM public.\"09项目阶段实例表\" si
+    JOIN public.\"08项目阶段定义表\" d ON d.id = si.stage_def_id
+    JOIN public.\"04项目总表\" g ON g.id = si.project_id
+    LEFT JOIN public.\"05人员表\" p ON p.id = g.\"05人员表_id\"
+    WHERE COALESCE(si.is_active, TRUE) = TRUE
+      AND COALESCE(g.\"is_active\", TRUE) = TRUE
+      AND si.actual_end_date IS NULL", and_auth, "
+    ORDER BY g.\"项目名称\", d.stage_order
+  ")
+  df <- tryCatch(DBI::dbGetQuery(conn, q), error = function(e) NULL)
+  if (is.null(df) || nrow(df) == 0L) return(.empty_msg_df())
+
+  rows <- list()
+  for (i in seq_len(nrow(df))) {
+    prog <- suppressWarnings(as.integer(df$progress[i]))
+    if (is.na(prog)) prog <- 0L
+    prog_pct <- prog
+    actual_prog <- prog / 100
+    plan_prog <- suppressWarnings(as.numeric(df$planned_progress[i]))
+    if (is.na(plan_prog)) plan_prog <- 0
+    diff <- plan_prog - actual_prog
+    pdo <- as.Date(df$planned_end_date[i])
+    pds <- as.Date(df$planned_start_date[i])
+    aed <- as.Date(df$actual_end_date[i])
+    upd <- as.POSIXct(df$updated_at[i])
+    pname <- as.character(df[["项目名称"]][i])
+    sname <- as.character(df$stage_name[i])
+    ptype <- as.character(df[["项目类型"]][i] %||% "")
+    pimp <- as.character(df[["重要紧急程度"]][i] %||% "")
+    pmgr <- as.character(df$manager_name[i] %||% "")
+    days_od <- suppressWarnings(as.integer(df$days_overdue[i]))
+    days_rem <- suppressWarnings(as.integer(df$days_remaining[i]))
+    days_lt <- suppressWarnings(as.integer(df$days_late[i]))
+    days_st <- suppressWarnings(as.integer(df$days_stale[i]))
+    p_db_id <- suppressWarnings(as.integer(df$project_db_id[i]))
+    si_id <- suppressWarnings(as.integer(df$stage_instance_id[i]))
+    tk <- as.character(df$task_key[i] %||% "")
+    if (is.na(days_od)) days_od <- 0L
+    if (is.na(days_rem)) days_rem <- 0L
+    if (is.na(days_lt)) days_lt <- 0L
+    if (is.na(days_st)) days_st <- 0L
+
+    # M1+M8 合并：阶段落后或逾期（逾期 OR 偏差>30%，去重：同一阶段只出一条）
+    is_overdue <- !is.na(pdo) && pdo < today && prog < 100
+    is_behind <- !is.na(diff) && diff > 0.30 && prog < 100 && is.na(aed)
+    if (is_overdue || is_behind) {
+      if (is_overdue && is_behind) {
+        msg <- sprintf("计划完成: %s, 已逾期 %d 天, 当前进度: %d%%, 偏差 %d%%",
+                       pdo, days_od, prog_pct, round(diff * 100))
+      } else if (is_overdue) {
+        msg <- sprintf("计划完成: %s, 已逾期 %d 天, 当前进度: %d%%", pdo, days_od, prog_pct)
+      } else {
+        msg <- sprintf("进度严重落后: 实际 %d%%, 计划应达 %d%%, 偏差 %d%%",
+                       prog_pct, round(plan_prog * 100), round(diff * 100))
+      }
+      worst <- max(if (is_overdue) days_od else 0L, if (is_behind) round(diff * 100) else 0L)
+      pri <- if (worst > 30L || (is_overdue && prog == 0L)) "critical"
+             else if (worst > 15L) "high"
+             else if (worst > 7L) "medium"
+             else "low"
+      rows[[length(rows) + 1L]] <- data.frame(
+        category = "阶段落后或逾期",
+        priority = pri,
+        project_name = pname,
+        stage_name = sname,
+        message_text = msg,
+        related_date = if (!is.na(pdo)) pdo else today,
+        days_value = worst,
+        sort_key = worst + 0.5,
+        project_type = ptype,
+        importance = pimp,
+        manager_name = pmgr,
+        project_db_id = p_db_id,
+        stage_instance_id = si_id,
+        task_key = tk,
+        feedback_id = NA_integer_,
+        decision_id = NA_integer_,
+        executor_json = NA_character_,
+        stringsAsFactors = FALSE
+      )
+    }
+
+    # M6: 未启动（已过计划开始日，实际未开始）
+    asd <- as.Date(df$actual_start_date[i])
+    if (!is.na(pds) && pds <= today && is.na(asd) && is.na(aed) && prog == 0L) {
+      pri <- if (days_lt > 14L) "critical"
+             else if (days_lt > 7L) "high"
+             else if (days_lt > 3L) "medium"
+             else "low"
+      rows[[length(rows) + 1L]] <- data.frame(
+        category = "未启动",
+        priority = pri,
+        project_name = pname,
+        stage_name = sname,
+        message_text = sprintf("应开始于: %s, 已延迟 %d 天未启动", pds, days_lt),
+        related_date = pds,
+        days_value = days_lt,
+        sort_key = days_lt + 0.3,
+        project_type = ptype,
+        importance = pimp,
+        manager_name = pmgr,
+        project_db_id = p_db_id,
+        stage_instance_id = si_id,
+        task_key = tk,
+        feedback_id = NA_integer_,
+        decision_id = NA_integer_,
+        executor_json = NA_character_,
+        stringsAsFactors = FALSE
+      )
+    }
+
+    # M7: 久未更新（已开始、未结束、0 < progress < 100，超过7天无更新）
+    asd <- as.Date(df$actual_start_date[i])
+    if (prog > 0L && prog < 100L && !is.na(upd) && !is.na(asd) && is.na(aed)) {
+      if (days_st > 7L) {
+        pri <- if (days_st > 30L) "critical"
+               else if (days_st > 14L) "high"
+               else "medium"
+        upd_date <- as.Date(upd)
+        rows[[length(rows) + 1L]] <- data.frame(
+          category = "久未更新",
+          priority = pri,
+          project_name = pname,
+          stage_name = sname,
+          message_text = sprintf("当前进度: %d%%, 最后更新: %s (%d 天无更新)", prog_pct, upd_date, days_st),
+          related_date = upd_date,
+          days_value = days_st,
+          sort_key = days_st + 0.2,
+          project_type = ptype,
+          importance = pimp,
+          manager_name = pmgr,
+          project_db_id = p_db_id,
+          stage_instance_id = si_id,
+          task_key = tk,
+          feedback_id = NA_integer_,
+          decision_id = NA_integer_,
+          executor_json = NA_character_,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+
+  if (length(rows) == 0L) return(.empty_msg_df())
+  do.call(rbind, rows)
+}
+
+# M3/M4：近期卡点与问题
+.fetch_feedback_personal_msgs <- function(conn, and_auth, today, days_back) {
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(.empty_msg_df())
+  q <- paste0("
+    SELECT f.id AS feedback_id, f.\"类型\", f.\"内容\", f.created_at,
+           f.reporters_json::text AS rj,
+           g.\"项目名称\", g.id AS project_db_id,
+           g.\"项目类型\", g.\"重要紧急程度\",
+           p.\"姓名\" AS manager_name,
+           COALESCE(si.\"阶段实例自定义名称\", d.stage_name) AS stage_name,
+           si.id AS stage_instance_id, d.stage_key AS task_key
+    FROM public.\"11阶段问题反馈表\" f
+    JOIN public.\"04项目总表\" g ON g.id = f.\"04项目总表_id\"
+    LEFT JOIN public.\"05人员表\" p ON p.id = g.\"05人员表_id\"
+    LEFT JOIN public.\"09项目阶段实例表\" si ON si.id = f.\"09项目阶段实例表_id\"
+    LEFT JOIN public.\"08项目阶段定义表\" d ON d.id = si.stage_def_id
+    WHERE f.\"类型\" IN ('卡点', '问题')
+      AND f.created_at >= CURRENT_DATE - (", days_back, " || ' days')::interval
+      AND COALESCE(g.\"is_active\", TRUE) = TRUE", and_auth, "
+    ORDER BY f.created_at DESC
+  ")
+  df <- tryCatch(DBI::dbGetQuery(conn, q), error = function(e) NULL)
+  if (is.null(df) || nrow(df) == 0L) return(.empty_msg_df())
+
+  rows <- list()
+  for (i in seq_len(nrow(df))) {
+    typ <- as.character(df[["类型"]][i])
+    content <- as.character(df[["内容"]][i])
+    pname <- as.character(df[["项目名称"]][i])
+    sname <- as.character(df$stage_name[i])
+    imp <- as.character(df[["重要紧急程度"]][i])
+    ptype <- as.character(df[["项目类型"]][i] %||% "")
+    pmgr <- as.character(df$manager_name[i] %||% "")
+    created <- as.POSIXct(df$created_at[i])
+    if (is.na(created)) next
+    days_ago <- as.integer(difftime(today, as.Date(created), units = "days"))
+    if (is.na(days_ago)) days_ago <- 0L
+
+    # 解析报告人
+    rj <- df[["rj"]][i]
+    reporters <- tryCatch({
+      jj <- jsonlite::fromJSON(rj, simplifyVector = TRUE)
+      if (is.null(jj)) "" else paste(as.character(jj), collapse = "、")
+    }, error = function(e) "")
+
+    cat_label <- if (identical(typ, "卡点")) "近期卡点" else "近期问题"
+
+    if (identical(typ, "卡点")) {
+      pri <- if (grepl("重要|紧急", imp) || days_ago > 7L) "critical"
+             else if (days_ago > 3L) "high"
+             else if (days_ago > 1L) "medium"
+             else "low"
+    } else {
+      pri <- if (days_ago > 7L) "high"
+             else if (days_ago > 3L) "medium"
+             else "low"
+    }
+
+    msg <- paste0(
+      if (nzchar(sname)) paste0("[", sname, "] ") else "",
+      typ, ": ", substr(content, 1, 80),
+      if (nzchar(reporters)) paste0(" (报告人: ", reporters, ")") else ""
+    )
+
+    rows[[length(rows) + 1L]] <- data.frame(
+      category = cat_label,
+      priority = pri,
+      project_name = pname,
+      stage_name = if (nzchar(sname)) sname else "",
+      message_text = msg,
+      related_date = as.Date(created),
+      days_value = days_ago,
+      sort_key = days_ago + 0.4,
+      project_type = ptype,
+      importance = imp,
+      manager_name = pmgr,
+      project_db_id = suppressWarnings(as.integer(df$project_db_id[i])),
+      stage_instance_id = suppressWarnings(as.integer(df$stage_instance_id[i] %||% NA_integer_)),
+      task_key = as.character(df$task_key[i] %||% ""),
+      feedback_id = suppressWarnings(as.integer(df$feedback_id[i])),
+      decision_id = NA_integer_,
+      executor_json = NA_character_,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  if (length(rows) == 0L) return(.empty_msg_df())
+  do.call(rbind, rows)
+}
+
+# M2：待执行的会议决策
+# common_user: 仅展示自己作为执行人且状态为"未执行"的决策
+# 领导(manager/super_admin/group_manager): 展示职权范围内所有含"未执行"执行人的决策（去重，一条决策只算一次）
+.fetch_meeting_action_msgs <- function(conn, auth, and_auth_meeting, today) {
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(.empty_msg_df())
+  if (is.null(auth) || !nzchar(auth$work_id)) return(.empty_msg_df())
+
+  is_leader <- isTRUE(auth$can_manage_project)
+  wid <- auth$work_id
+
+  q <- paste0("
+    SELECT t.id, t.\"会议名称\", t.\"会议时间\", t.\"决策内容\",
+           t.\"决策执行人及执行确认\"::text AS exec_json
+    FROM public.\"10会议决策表\" t
+    WHERE t.\"决策执行人及执行确认\" IS NOT NULL", and_auth_meeting, "
+    ORDER BY t.\"会议时间\" DESC NULLS LAST
+  ")
+  df <- tryCatch(DBI::dbGetQuery(conn, q), error = function(e) NULL)
+  if (is.null(df) || nrow(df) == 0L) return(.empty_msg_df())
+
+  rows <- list()
+  for (i in seq_len(nrow(df))) {
+    ej <- as.character(df$exec_json[i])
+    exec_df <- parse_executor_json(ej)
+    if (nrow(exec_df) == 0L) next
+
+    pending_df <- exec_df[trimws(as.character(exec_df[["状态"]])) == "未执行", , drop = FALSE]
+    if (nrow(pending_df) == 0L) next
+
+    if (!is_leader) {
+      # 普通用户：只看自己作为执行人且未执行的
+      my_rows <- pending_df[grepl(paste0("-", wid, "$"), pending_df$key), , drop = FALSE]
+      if (nrow(my_rows) == 0L) next
+    }
+    # 领导：只要该决策有任何"未执行"的执行人就纳入（去重，一条决策一次）
+
+    mtg_name <- as.character(df[["会议名称"]][i])
+    mtg_time <- as.POSIXct(df[["会议时间"]][i])
+    decision <- as.character(df[["决策内容"]][i])
+    days_since <- if (!is.na(mtg_time)) as.integer(difftime(today, as.Date(mtg_time), units = "days")) else 0L
+    if (is.na(days_since)) days_since <- 0L
+
+    pri <- if (days_since > 30L) "critical"
+           else if (days_since > 14L) "high"
+           else if (days_since > 7L) "medium"
+           else "low"
+
+    mtg_label <- if (nzchar(mtg_name)) mtg_name else "会议"
+    mtg_date_str <- if (!is.na(mtg_time)) format(as.Date(mtg_time), "%Y-%m-%d") else "未知日期"
+
+    # 附加未执行执行人摘要
+    pending_names <- vapply(pending_df$key, executor_display_name_from_key, character(1))
+    pending_summary <- paste(pending_names, collapse = "、")
+
+    rows[[length(rows) + 1L]] <- data.frame(
+      category = "待执行决策",
+      priority = pri,
+      project_name = paste0(mtg_label, " (", mtg_date_str, ")"),
+      stage_name = "",
+      message_text = paste0("决策: ", substr(decision, 1, 60), if (nchar(decision) > 60) "..." else "",
+                            " | 待执行: ", pending_summary),
+      related_date = if (!is.na(mtg_time)) as.Date(mtg_time) else today,
+      days_value = days_since,
+      sort_key = days_since + 0.6,
+      project_type = "",
+      importance = "",
+      manager_name = "",
+      project_db_id = NA_integer_,
+      stage_instance_id = NA_integer_,
+      task_key = NA_character_,
+      feedback_id = NA_integer_,
+      decision_id = as.integer(df$id[i]),
+      executor_json = ej,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  if (length(rows) == 0L) return(.empty_msg_df())
+  do.call(rbind, rows)
+}
+
+# 个人消息汇总：合并所有类别
+fetch_personal_messages <- function(conn, auth, days_back = 14L) {
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(.empty_msg_df())
+  if (is.null(auth) || isTRUE(auth$allow_none)) return(.empty_msg_df())
+
+  and_auth <- if (auth$allow_all) "" else paste0(' AND g.id IN (', auth$allowed_subquery, ')')
+  and_auth_meeting <- meeting_decision_auth_sql(auth)
+  today <- today_beijing()
+
+  stage_msgs <- .fetch_stage_personal_msgs(conn, and_auth, today)
+  feedback_msgs <- .fetch_feedback_personal_msgs(conn, and_auth, today, as.integer(days_back))
+  meeting_msgs <- .fetch_meeting_action_msgs(conn, auth, and_auth_meeting, today)
+
+  all_msgs <- rbind(stage_msgs, feedback_msgs, meeting_msgs)
+  if (nrow(all_msgs) == 0L) return(.empty_msg_df())
+
+  # 按优先级排序
+  pri_rank <- c(critical = 1L, high = 2L, medium = 3L, low = 4L)
+  all_msgs$pri_rank <- pri_rank[all_msgs$priority]
+  all_msgs <- all_msgs[order(all_msgs$pri_rank, -all_msgs$sort_key), ]
+  all_msgs$pri_rank <- NULL
+  rownames(all_msgs) <- NULL
+  all_msgs
+}
+
+# 消息优先级颜色与标签
+msg_priority_info <- function(priority) {
+  switch(priority,
+    critical = list(color = "#F44336", bg = "#FFEBEE", label = "关键"),
+    high     = list(color = "#FF6F00", bg = "#FFF3E0", label = "高"),
+    medium   = list(color = "#F57C00", bg = "#FFF8E1", label = "中"),
+    low      = list(color = "#2196F3", bg = "#E3F2FD", label = "低"),
+    list(color = "#757575", bg = "#F5F5F5", label = "信息")
+  )
+}
+
+# ---------- 单项目甘特图数据构建（消息页下钻用） ----------
+
+# 甘特颜色逻辑复用（与 processed_data 中 items_centers/items_sync 完全一致）
+.gantt_item_color_style <- function(is_unplanned, plan_no_actual_start, is_not_started, missing_actual_done,
+                                     progress_diff, is_completed, bg_default = "#9E9E9E") {
+  bg_color <- case_when(
+    is_unplanned ~ "#EDEDED",
+    is_not_started ~ "#9E9E9E",
+    missing_actual_done ~ "#2196F3",
+    progress_diff < -0.5 ~ "#F44336",
+    progress_diff >= -0.5 & progress_diff < -0.3 ~ "#FF6F00",
+    progress_diff >= -0.3 & progress_diff < -0.15 ~ "#FFC107",
+    progress_diff >= -0.15 & progress_diff < -0.05 ~ "#FFEB3B",
+    progress_diff >= -0.05 & progress_diff < 0.1 ~ "#CDDC39",
+    progress_diff >= 0.1 & progress_diff < 0.25 ~ "#8BC34A",
+    progress_diff >= 0.25 ~ "#4CAF50",
+    TRUE ~ bg_default
+  )
+  border_color <- if_else(is_unplanned, "#D0D0D0", bg_color)
+  text_color <- ifelse(
+    is_unplanned, "#555555",
+    ifelse(is_not_started, "#FFFFFF",
+      case_when(
+        progress_diff < -0.3 ~ "white",
+        progress_diff >= 0.25 ~ "white",
+        TRUE ~ "#333333"
+      )
+    )
+  )
+  style <- ifelse(is_unplanned,
+    sprintf("background-color: %s; border-color: %s; color: %s; border-width: 1px; border-style: solid;", bg_color, border_color, text_color),
+    sprintf("background-color: %s; border-color: %s; color: %s; border-width: 2px;", bg_color, border_color, text_color))
+  list(bg_color = bg_color, style = style)
+}
+
+build_single_project_gantt_data <- function(conn, project_db_id, sync_stages, stage_label_fn) {
+  if (is.null(conn) || !DBI::dbIsValid(conn)) return(NULL)
+  pid <- suppressWarnings(as.integer(project_db_id))
+  if (is.na(pid)) return(NULL)
+  today <- today_beijing()
+  ss <- sync_stages
+
+  stage_rows <- tryCatch(
+    DBI::dbGetQuery(conn,
+      'SELECT * FROM public."v_项目阶段甘特视图_全部" WHERE proj_row_id = $1 ORDER BY stage_ord, site_name',
+      params = list(pid)),
+    error = function(e) NULL
+  )
+  if (is.null(stage_rows) || nrow(stage_rows) == 0) return(NULL)
+
+  gd <- finalize_gantt_stage_rows(stage_rows, today, ss, drop_stage_ord = TRUE)
+
+  # 避免 bind_rows 时 pq_jsonb 与缺失列类型冲突：将 JSON 列统一为 character
+  json_cols <- c("remark_json", "contributors_json", "milestones_json", "sample_json")
+  for (jc in json_cols) if (jc %in% names(gd)) gd[[jc]] <- as.character(gd[[jc]])
+
+  # --- Groups ---
+  groups_centers <- gd %>%
+    filter(!task_name %in% ss) %>%
+    group_by(project_id, site_name) %>%
+    summarise(avg_p = mean(progress), .groups = "drop") %>%
+    arrange(project_id, site_name) %>%
+    mutate(
+      id = paste0(project_id, "_", site_name),
+      content = sprintf("<div style='padding:2px 6px;font-size:13px;'>%s</div>", site_name),
+      className = "gantt-bg-default"
+    )
+
+  groups_sync <- gd %>%
+    filter(task_name %in% ss) %>%
+    group_by(project_id) %>%
+    summarise(avg_p = mean(progress), .groups = "drop") %>%
+    mutate(
+      id = paste0(project_id, "_同步阶段"),
+      content = "<div style='padding:2px 6px;font-size:13px;line-height:1.35;'>各中心同步阶段</div>",
+      className = "gantt-bg-default"
+    )
+
+  groups_data <- bind_rows(groups_sync, groups_centers) %>%
+    arrange(project_id, desc(id == paste0(project_id, "_同步阶段")), site_name)
+
+  # --- Items ---
+  # Center items
+  if (nrow(gd %>% filter(!task_name %in% ss)) > 0) {
+    items_centers <- gd %>%
+      filter(!task_name %in% ss) %>%
+      mutate(
+        id = row_number(),
+        group = paste0(project_id, "_", site_name),
+        planned_duration = dplyr::if_else(is_unplanned, 30.0, as.numeric(planned_end_date - planned_start_date)),
+        is_completed = !is.na(actual_end_date),
+        plan_no_actual_start = !is_unplanned & is.na(actual_start_date) &
+          !is.na(planned_start_date) & !is.na(planned_end_date) & is.na(actual_end_date),
+        planned_progress = ifelse(plan_no_actual_start, 0.0,
+          ifelse(is_completed,
+            ifelse(planned_duration > 0, as.numeric(actual_end_date - start_date) / planned_duration, 1.0),
+            ifelse(planned_duration > 0, as.numeric(today - start_date) / planned_duration,
+              ifelse(today >= start_date, 1.0, 0.0)))),
+        actual_progress = ifelse(is_completed, 1.0, progress),
+        progress_diff = actual_progress - planned_progress,
+        is_not_started = plan_no_actual_start |
+          (!is_unplanned & today < start_date & progress == 0 & is.na(actual_end_date)),
+        missing_actual_done = is.na(actual_end_date) & progress >= 1.0,
+        start = dplyr::if_else(is.na(start_date), today, start_date),
+        theoretical_end = dplyr::case_when(
+          is_unplanned ~ planned_end_date,
+          !is.na(actual_start_date) & !is.na(planned_start_date) & !is.na(planned_end_date) ~
+            actual_start_date + as.numeric(planned_end_date - planned_start_date),
+          TRUE ~ planned_end_date),
+        end = dplyr::case_when(
+          is_unplanned ~ as.character(dplyr::coalesce(planned_end_date, start_date + 30L)),
+          !is.na(actual_end_date) ~ as.character(actual_end_date),
+          today > theoretical_end ~ as.character(today),
+          TRUE ~ as.character(theoretical_end)),
+        content = paste0(
+          ifelse(!is.na(task_display_name) & nzchar(as.character(task_display_name)),
+                 as.character(task_display_name), vapply(task_name, stage_label_fn, character(1))),
+          ifelse(is_unplanned, " (未制定计划)", ""), " ",
+          ifelse(!is.na(actual_end_date), 100, round(progress * 100, 0)), "%"),
+        type = "range"
+      )
+    # Apply color
+    cs <- mapply(function(up, pnas, ins, mad, pd) {
+      .gantt_item_color_style(up, pnas, ins, mad, pd, FALSE)
+    }, items_centers$is_unplanned, items_centers$plan_no_actual_start,
+       items_centers$is_not_started, items_centers$missing_actual_done,
+       items_centers$progress_diff, SIMPLIFY = FALSE)
+    items_centers$style <- sapply(cs, `[[`, "style")
+  } else {
+    items_centers <- data.frame()
+  }
+
+  # Sync items
+  if (nrow(gd %>% filter(task_name %in% ss)) > 0) {
+    items_sync <- gd %>%
+      filter(task_name %in% ss) %>%
+      group_by(project_id, task_name) %>%
+      summarise(
+        start_date = first(start_date), actual_start_date = first(actual_start_date),
+        planned_start_date = first(planned_start_date), planned_end_date = first(planned_end_date),
+        actual_end_date = first(actual_end_date), progress = first(progress),
+        is_unplanned = first(is_unplanned), task_display_name = first(task_display_name),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        id = max(items_centers$id, 0) + row_number(),
+        group = paste0(project_id, "_同步阶段"),
+        planned_duration = dplyr::if_else(is_unplanned, 30.0, as.numeric(planned_end_date - planned_start_date)),
+        is_completed = !is.na(actual_end_date),
+        plan_no_actual_start = !is_unplanned & is.na(actual_start_date) &
+          !is.na(planned_start_date) & !is.na(planned_end_date) & is.na(actual_end_date),
+        planned_progress = ifelse(plan_no_actual_start, 0.0,
+          ifelse(is_completed,
+            ifelse(planned_duration > 0, as.numeric(actual_end_date - start_date) / planned_duration, 1.0),
+            ifelse(planned_duration > 0, as.numeric(today - start_date) / planned_duration,
+              ifelse(today >= start_date, 1.0, 0.0)))),
+        actual_progress = ifelse(is_completed, 1.0, progress),
+        progress_diff = actual_progress - planned_progress,
+        is_not_started = plan_no_actual_start |
+          (!is_unplanned & today < start_date & progress == 0 & is.na(actual_end_date)),
+        missing_actual_done = is.na(actual_end_date) & progress >= 1.0,
+        start = dplyr::if_else(is.na(start_date), today, start_date),
+        theoretical_end = dplyr::case_when(
+          is_unplanned ~ planned_end_date,
+          !is.na(actual_start_date) & !is.na(planned_start_date) & !is.na(planned_end_date) ~
+            actual_start_date + as.numeric(planned_end_date - planned_start_date),
+          TRUE ~ planned_end_date),
+        end = dplyr::case_when(
+          is_unplanned ~ as.character(dplyr::coalesce(planned_end_date, start_date + 30L)),
+          !is.na(actual_end_date) ~ as.character(actual_end_date),
+          today > theoretical_end ~ as.character(today),
+          TRUE ~ as.character(theoretical_end)),
+        content = paste0(
+          ifelse(!is.na(task_display_name) & nzchar(as.character(task_display_name)),
+                 as.character(task_display_name), vapply(task_name, stage_label_fn, character(1))),
+          ifelse(is_unplanned, " (未制定计划)", ""), " ",
+          ifelse(!is.na(actual_end_date), 100, round(progress * 100, 0)), "%"),
+        type = "range"
+      )
+    cs2 <- mapply(function(up, pnas, ins, mad, pd) {
+      .gantt_item_color_style(up, pnas, ins, mad, pd, FALSE)
+    }, items_sync$is_unplanned, items_sync$plan_no_actual_start,
+       items_sync$is_not_started, items_sync$missing_actual_done,
+       items_sync$progress_diff, SIMPLIFY = FALSE)
+    items_sync$style <- sapply(cs2, `[[`, "style")
+  } else {
+    items_sync <- data.frame()
+  }
+
+  # Merge items
+  if (nrow(items_centers) == 0) {
+    items_data <- items_sync
+  } else if (nrow(items_sync) == 0) {
+    items_data <- items_centers
+  } else {
+    items_data <- bind_rows(items_centers, items_sync)
+  }
+
+  list(items = items_data, groups = groups_data)
+}

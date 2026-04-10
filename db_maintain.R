@@ -44,13 +44,12 @@ HOSP_EDITABLE_COLS <- c(
   "样本资源说明", "LIS获取难度", "LIS资源说明", "样本资源获取难度",
   "已获取样本信息", "GCP知情同意", "科研知情同意",
   "科室联系人评价", "机构联系人评价", "机构备注",
-  "地址经度", "地址纬度", "临床合作基地",
+  "地址经度", "地址纬度", "医院合作等级",
   "科室备注", "HIS与病例资源获取难度", "HIS与病例资源说明"
 )
 
 INST_COLS <- c("仪器型号", "厂家", "方法学", "备注")
 SAMPLE_COLS <- c("样本类型分类", "样本疾病分类")
-MAX_SUB_ROWS <- 20
 
 is_free_text_col <- function(col) grepl("说明$|备注$", col)
 
@@ -109,12 +108,41 @@ ui <- fluidPage(
       .sub-row .form-group { margin-bottom: 0; flex: 1; }
       .btn-del-row { background: none; border: none; color: #dc3545; cursor: pointer; font-size: 18px; margin-left: 8px; padding: 0 8px; }
       .btn-del-row:hover { color: #a71d2a; }
+    ")),
+    tags$script(HTML("
+      $(document).on('click', '.btn-del-inst', function(e) {
+        e.preventDefault();
+        var idx = $(this).attr('data-idx');
+        Shiny.onInputChange('del_inst_row', idx + '_' + Date.now());
+      });
+      $(document).on('click', '.btn-del-samp', function(e) {
+        e.preventDefault();
+        var idx = $(this).attr('data-idx');
+        Shiny.onInputChange('del_samp_row', idx + '_' + Date.now());
+      });
     "))
   ),
   uiOutput("page_title"),
   uiOutput("user_bar"),
   uiOutput("no_access"),
-  uiOutput("main_content")
+  fluidRow(
+    column(8,
+      selectizeInput("sel_hosp", "选择医院",
+        choices = NULL,
+        width = "100%",
+        options = list(placeholder = "输入关键词搜索医院...", highlight = TRUE))
+    ),
+    column(4,
+      tags$div(style = "margin-top: 24px;",
+        actionButton("btn_new_hosp", "新增医院", class = "btn-success", style = "margin-right: 8px;")
+      )
+    )
+  ),
+  tags$hr(),
+  uiOutput("hosp_editor"),
+  uiOutput("inst_editor"),
+  uiOutput("sample_editor"),
+  uiOutput("save_area")
 )
 
 # ==================== 4. Server ====================
@@ -161,6 +189,7 @@ server <- function(input, output, session) {
 
   # ---- 医院列表 ----
   hosp_list_df <- reactive({
+    hosp_list_version()
     tryCatch({
       DBI::dbGetQuery(pg_pool, 'SELECT id, "医院名称" FROM public."01医院信息表" ORDER BY id')
     }, error = function(e) data.frame(id = integer(0), "医院名称" = character(0), check.names = FALSE))
@@ -190,6 +219,7 @@ server <- function(input, output, session) {
   hosp_orig <- reactiveVal(list())
   inst_orig <- reactiveVal(list())
   sample_orig <- reactiveVal(list())
+  hosp_list_version <- reactiveVal(0L)
 
   # ---- 辅助：从当前 input 读取所有值 ----
 
@@ -314,22 +344,24 @@ server <- function(input, output, session) {
     })
   }
 
-  # ---- 主内容 ----
-
-  output$main_content <- renderUI({
-    a <- auth()
-    if (!a$ok) return(NULL)
-
-    rt <- refresh_token()
+  # ---- 医院选择器（静态 UI，用 updateSelectizeInput 同步）----
+  observe({
     hc <- hosp_choices_vec()
-
-    # 医院选择器的当前值
-    sel_val <- if (is_new_hosp()) "" else {
+    if (is_new_hosp()) {
+      hc <- c(setNames("__new__", "\u65b0\u589e\u533b\u9662"), hc)
+      sel <- "__new__"
+    } else {
       hid <- selected_hosp_id()
-      if (is.na(hid)) "" else as.character(hid)
+      sel <- if (is.na(hid)) character(0) else as.character(hid)
     }
+    updateSelectizeInput(session, "sel_hosp", choices = hc, selected = sel)
+  })
 
-    # ---- 医院信息输入控件 ----
+  # ---- 医院信息编辑区（独立渲染，不受仪器/样本影响）----
+  output$hosp_editor <- renderUI({
+    a <- auth()
+    if (!a$ok || !show_editor()) return(NULL)
+    title_text <- if (is_new_hosp()) "新增医院" else paste0("医院信息 (id=", selected_hosp_id(), ")")
     hv <- hosp_vals()
     hosp_inputs <- lapply(HOSP_EDITABLE_COLS, function(col) {
       input_id <- paste0("h_", col)
@@ -353,8 +385,16 @@ server <- function(input, output, session) {
     hosp_rows <- lapply(seq(1, length(hosp_inputs), by = 3), function(i) {
       fluidRow(hosp_inputs[seq(i, min(i + 2, length(hosp_inputs)))])
     })
+    tagList(
+      tags$div(class = "section-title", title_text),
+      tags$div(class = "edit-section", hosp_rows)
+    )
+  })
 
-    # ---- 仪器行 ----
+  # ---- 仪器编辑区（独立渲染，仅依赖 inst_vals）----
+  output$inst_editor <- renderUI({
+    a <- auth()
+    if (!a$ok || !show_editor()) return(NULL)
     iv <- inst_vals()
     inst_ui <- lapply(seq_along(iv), function(i) {
       row_data <- iv[[i]]
@@ -377,11 +417,23 @@ server <- function(input, output, session) {
       })
       tags$div(class = "sub-row",
         row_divs,
-        actionButton(paste0("del_inst_", i), "\u2716", class = "btn-del-row", title = "删除此行")
+        tags$button(class = "btn-del-row btn-del-inst", `data-idx` = as.character(i),
+                    type = "button", "\u2716", title = "删除此行")
       )
     })
+    tagList(
+      tags$div(class = "section-title", "关联仪器"),
+      tags$div(class = "edit-section",
+        inst_ui,
+        actionButton("btn_add_inst", "新增仪器", class = "btn-sm btn-success")
+      )
+    )
+  })
 
-    # ---- 样本行 ----
+  # ---- 样本编辑区（独立渲染，仅依赖 sample_vals）----
+  output$sample_editor <- renderUI({
+    a <- auth()
+    if (!a$ok || !show_editor()) return(NULL)
     sv_data <- sample_vals()
     sample_ui <- lapply(seq_along(sv_data), function(i) {
       row_data <- sv_data[[i]]
@@ -404,51 +456,26 @@ server <- function(input, output, session) {
       })
       tags$div(class = "sub-row",
         row_divs,
-        actionButton(paste0("del_samp_", i), "\u2716", class = "btn-del-row", title = "删除此行")
+        tags$button(class = "btn-del-row btn-del-samp", `data-idx` = as.character(i),
+                    type = "button", "\u2716", title = "删除此行")
       )
     })
-
-    # ---- 编辑器区域 ----
-    editor_ui <- NULL
-    if (show_editor()) {
-      title_text <- if (is_new_hosp()) "新增医院" else paste0("医院信息 (id=", selected_hosp_id(), ")")
-      editor_ui <- tagList(
-        tags$div(class = "section-title", title_text),
-        tags$div(class = "edit-section", hosp_rows),
-        tags$div(class = "section-title", "关联仪器"),
-        tags$div(class = "edit-section",
-          inst_ui,
-          actionButton("btn_add_inst", "新增仪器", class = "btn-sm btn-success")
-        ),
-        tags$div(class = "section-title", "关联样本资源"),
-        tags$div(class = "edit-section",
-          sample_ui,
-          actionButton("btn_add_sample", "新增样本", class = "btn-sm btn-success")
-        ),
-        tags$div(style = "margin: 20px 0;",
-          actionButton("btn_save", "保存当前医院信息", class = "btn-primary btn-lg"),
-          tags$span(id = "save_status", style = "margin-left: 12px; color: #888;")
-        )
-      )
-    }
-
     tagList(
-      fluidRow(
-        column(8,
-          selectizeInput("sel_hosp", "选择医院",
-            choices = hc,
-            selected = if (nzchar(sel_val)) sel_val else NULL,
-            width = "100%",
-            options = list(placeholder = "输入关键词搜索医院...", highlight = TRUE))
-        ),
-        column(4,
-          tags$div(style = "margin-top: 24px;",
-            actionButton("btn_new_hosp", "新增医院", class = "btn-success", style = "margin-right: 8px;")
-          )
-        )
-      ),
-      tags$hr(),
-      editor_ui
+      tags$div(class = "section-title", "关联样本资源"),
+      tags$div(class = "edit-section",
+        sample_ui,
+        actionButton("btn_add_sample", "新增样本", class = "btn-sm btn-success")
+      )
+    )
+  })
+
+  # ---- 保存按钮区 ----
+  output$save_area <- renderUI({
+    a <- auth()
+    if (!a$ok || !show_editor()) return(NULL)
+    tags$div(style = "margin: 20px 0;",
+      actionButton("btn_save", "保存当前医院信息", class = "btn-primary btn-lg"),
+      tags$span(id = "save_status", style = "margin-left: 12px; color: #888;")
     )
   })
 
@@ -456,6 +483,7 @@ server <- function(input, output, session) {
   observeEvent(input$sel_hosp, {
     sel <- input$sel_hosp
     if (is.null(sel) || !nzchar(sel)) {
+      if (is_new_hosp()) return()
       show_editor(FALSE)
       is_new_hosp(FALSE)
       selected_hosp_id(NA_integer_)
@@ -468,6 +496,7 @@ server <- function(input, output, session) {
       refresh_token(refresh_token() + 1L)
       return()
     }
+    if (sel == "__new__") return()
     hid <- as.integer(sel)
     selected_hosp_id(hid)
     is_new_hosp(FALSE)
@@ -488,64 +517,45 @@ server <- function(input, output, session) {
     inst_orig(list())
     sample_orig(list())
     refresh_token(refresh_token() + 1L)
+    updateSelectizeInput(session, "sel_hosp",
+      choices = c(setNames("__new__", "\u65b0\u589e\u533b\u9662"), hosp_choices_vec()),
+      selected = "__new__")
   })
 
-  # ---- 删除仪器行 ----
-  for (i in seq_len(MAX_SUB_ROWS)) {
-    local({
-      ii <- i
-      observeEvent(input[[paste0("del_inst_", ii)]], {
-        current <- snapshot_inst_inputs()
-        n <- length(current)
-        if (n == 0 || ii > n) return
-        new_iv <- current[-ii]
-        inst_vals(new_iv)
-        refresh_token(refresh_token() + 1L)
-      }, ignoreInit = TRUE)
-    })
-  }
+  # ---- 删除仪器行（JS 事件委托）----
+  observeEvent(input$del_inst_row, {
+    raw <- input$del_inst_row
+    idx <- as.integer(sub("_.*$", "", as.character(raw)))
+    if (is.na(idx)) return
+    current <- snapshot_inst_inputs()
+    if (idx < 1 || idx > length(current)) return
+    inst_vals(current[-idx])
+  }, ignoreInit = TRUE)
 
-  # ---- 删除样本行 ----
-  for (i in seq_len(MAX_SUB_ROWS)) {
-    local({
-      ii <- i
-      observeEvent(input[[paste0("del_samp_", ii)]], {
-        current <- snapshot_sample_inputs()
-        n <- length(current)
-        if (n == 0 || ii > n) return
-        new_sv <- current[-ii]
-        sample_vals(new_sv)
-        refresh_token(refresh_token() + 1L)
-      }, ignoreInit = TRUE)
-    })
-  }
+  # ---- 删除样本行（JS 事件委托）----
+  observeEvent(input$del_samp_row, {
+    raw <- input$del_samp_row
+    idx <- as.integer(sub("_.*$", "", as.character(raw)))
+    if (is.na(idx)) return
+    current <- snapshot_sample_inputs()
+    if (idx < 1 || idx > length(current)) return
+    sample_vals(current[-idx])
+  }, ignoreInit = TRUE)
 
   # ---- 新增仪器行 ----
   observeEvent(input$btn_add_inst, {
     current <- snapshot_inst_inputs()
-    if (length(current) >= MAX_SUB_ROWS) {
-      showNotification(sprintf("最多只能添加 %d 条仪器记录", MAX_SUB_ROWS), type = "warning")
-      return()
-    }
     empty_row <- list(id = NA_integer_)
     for (col in INST_COLS) empty_row[[col]] <- ""
-    current <- c(current, list(empty_row))
-    inst_vals(current)
-    refresh_token(refresh_token() + 1L)
+    inst_vals(c(current, list(empty_row)))
   })
 
   # ---- 新增样本行 ----
   observeEvent(input$btn_add_sample, {
     current <- snapshot_sample_inputs()
-    if (length(current) >= MAX_SUB_ROWS) {
-      showNotification(sprintf("最多只能添加 %d 条样本记录", MAX_SUB_ROWS), type = "warning")
-      return()
-    }
     empty_row <- list(id = NA_integer_)
     for (col in SAMPLE_COLS) empty_row[[col]] <- ""
-    current <- c(current, list(empty_row))
-    sample_vals(current)
-    refresh_token(refresh_token() + 1L)
+    sample_vals(c(current, list(empty_row)))
   })
 
   # ---- 保存（变更检测 + 确认弹窗）----
@@ -774,9 +784,9 @@ server <- function(input, output, session) {
             paste(sprintf('"%s"', INST_COLS), collapse = ", "),
             paste(paste0("$", 2:(1 + length(INST_COLS))), collapse = ", "),
             2L + length(INST_COLS), 3L + length(INST_COLS), 4L + length(INST_COLS))
-          params <- c(list(new_id),
+          params <- unname(c(list(new_id),
                       lapply(row_data[INST_COLS], function(v) if (is.null(v) || is.na(v)) NA_character_ else v),
-                      list(as.integer(hid), a$work_id, a$work_id))
+                      list(as.integer(hid), a$work_id, a$work_id)))
           DBI::dbExecute(pg_pool, q_ins, params = params)
           insert_audit_log(pg_pool, a$work_id, a$name,
             "INSERT", "02仪器资源表", new_id,
@@ -840,9 +850,9 @@ server <- function(input, output, session) {
             paste(sprintf('"%s"', SAMPLE_COLS), collapse = ", "),
             paste(paste0("$", 2:(1 + length(SAMPLE_COLS))), collapse = ", "),
             2L + length(SAMPLE_COLS), 3L + length(SAMPLE_COLS), 4L + length(SAMPLE_COLS))
-          params <- c(list(new_id),
+          params <- unname(c(list(new_id),
                       lapply(row_data[SAMPLE_COLS], function(v) if (is.null(v) || is.na(v)) NA_character_ else v),
-                      list(as.integer(hid), a$work_id, a$work_id))
+                      list(as.integer(hid), a$work_id, a$work_id)))
           DBI::dbExecute(pg_pool, q_ins, params = params)
           insert_audit_log(pg_pool, a$work_id, a$name,
             "INSERT", "06样本资源表", new_id,
@@ -892,6 +902,7 @@ server <- function(input, output, session) {
         is_new_hosp(FALSE)
         selected_hosp_id(hid)
         show_editor(TRUE)
+        hosp_list_version(hosp_list_version() + 1L)
       }
       load_hosp_data(hid)
       refresh_token(refresh_token() + 1L)

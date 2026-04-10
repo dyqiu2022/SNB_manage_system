@@ -303,7 +303,7 @@ CREATE TABLE public."01医院信息表" (
     "机构备注" text,
     "地址经度" numeric,
     "地址纬度" numeric,
-    "临床合作基地" text,
+    "医院合作等级" text,
     created_at timestamp without time zone,
     updated_at timestamp without time zone,
     updated_by character varying,
