@@ -176,6 +176,7 @@ fetch_decisions_linked_to_feedback_ids <- function(conn, fb_ids) {
     meeting_label = character(0),
     decision_content = character(0),
     exec_json = character(0),
+    meeting_time = as.POSIXct(character(0)),
     stringsAsFactors = FALSE
   )
   if (is.null(conn) || !DBI::dbIsValid(conn) || length(fb_ids) == 0L) {
@@ -187,7 +188,8 @@ fetch_decisions_linked_to_feedback_ids <- function(conn, fb_ids) {
               t.id AS decision_id,
               (COALESCE(NULLIF(t."会议名称", \'\'), \'会议\') || \'（\' || COALESCE(to_char(t."会议时间", \'YYYY-MM-DD HH24:MI\'), \'\') || \'）\') AS meeting_lbl,
               COALESCE(t."决策内容", \'\') AS decision_content,
-              t."决策执行人及执行确认"::text AS exec_json
+              t."决策执行人及执行确认"::text AS exec_json,
+              t."会议时间" AS meeting_time
        FROM public."12会议决策关联问题表" l
        INNER JOIN public."10会议决策表" t ON t.id = l."10会议决策表_id"
        WHERE l."11阶段问题反馈表_id" IN (%s)
@@ -215,6 +217,7 @@ fetch_decisions_linked_to_feedback_ids <- function(conn, fb_ids) {
         meeting_label = as.character(sub$meeting_lbl),
         decision_content = as.character(sub$decision_content),
         exec_json = as.character(sub$exec_json),
+        meeting_time = as.POSIXct(sub$meeting_time),
         stringsAsFactors = FALSE
       )
     }
@@ -1751,19 +1754,34 @@ meeting_new_build_project_choices <- function(conn, auth) {
 }
 
 #' 与甘特侧栏相同的维度 distinct 选项（按 04 与权限裁剪）
-fetch_gantt_dim_filter_options <- function(conn, auth) {
+fetch_gantt_dim_filter_options <- function(conn, auth, complement = FALSE) {
   if (is.null(conn) || !DBI::dbIsValid(conn)) return(NULL)
   if (is.null(auth) || isTRUE(auth$allow_none)) {
     return(list(
       types = character(0), names = character(0), managers = character(0),
       participants = character(0), importance = character(0), hospitals = character(0),
-      research_groups = character(0)
+      research_groups = character(0), manager_groups = character(0)
     ))
   }
-  and_04 <- if (auth$allow_all) "" else paste0(" AND id IN (", auth$allowed_subquery, ")")
-  and_g  <- if (auth$allow_all) "" else paste0(" AND g.id IN (", auth$allowed_subquery, ")")
-  and_m  <- if (auth$allow_all) "" else paste0(" AND m.\"04项目总表_id\" IN (", auth$allowed_subquery, ")")
-  and_s  <- if (auth$allow_all) "" else paste0(" AND s.\"project_table 项目总表_id\" IN (", auth$allowed_subquery, ")")
+  if (isTRUE(complement)) {
+    subq <- auth$disallowed_subquery
+    if (is.null(subq) || !nzchar(subq)) {
+      return(list(
+        types = character(0), names = character(0), managers = character(0),
+        participants = character(0), importance = character(0), hospitals = character(0),
+        research_groups = character(0), manager_groups = character(0)
+      ))
+    }
+    and_04 <- paste0(" AND id IN (", subq, ")")
+    and_g  <- paste0(" AND g.id IN (", subq, ")")
+    and_m  <- paste0(" AND m.\"04项目总表_id\" IN (", subq, ")")
+    and_s  <- paste0(" AND s.\"project_table 项目总表_id\" IN (", subq, ")")
+  } else {
+    and_04 <- if (auth$allow_all) "" else paste0(" AND id IN (", auth$allowed_subquery, ")")
+    and_g  <- if (auth$allow_all) "" else paste0(" AND g.id IN (", auth$allowed_subquery, ")")
+    and_m  <- if (auth$allow_all) "" else paste0(" AND m.\"04项目总表_id\" IN (", auth$allowed_subquery, ")")
+    and_s  <- if (auth$allow_all) "" else paste0(" AND s.\"project_table 项目总表_id\" IN (", auth$allowed_subquery, ")")
+  }
   tryCatch({
     types <- character(0)
     names_ <- character(0)
@@ -1772,6 +1790,7 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
     importance <- character(0)
     hospitals <- character(0)
     research_groups <- character(0)
+    manager_groups <- character(0)
     t1 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "项目类型" AS v FROM public."04项目总表" WHERE "项目类型" IS NOT NULL', and_04, " ORDER BY 1"))
     if (nrow(t1) > 0) types <- as.character(t1$v)
     t2 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "项目名称" AS v FROM public."04项目总表" WHERE "项目名称" IS NOT NULL', and_04, " ORDER BY 1"))
@@ -1789,6 +1808,8 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
     if (nrow(t6) > 0) hospitals <- as.character(t6$v)
     t7 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "课题组" AS v FROM public."04项目总表" WHERE "课题组" IS NOT NULL', and_04, " ORDER BY 1"))
     if (nrow(t7) > 0) research_groups <- as.character(t7$v)
+    t8 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT p."组别" AS v FROM public."05人员表" p INNER JOIN public."04项目总表" g ON g."05人员表_id" = p.id WHERE p."组别" IS NOT NULL AND g."05人员表_id" IS NOT NULL', and_g, " ORDER BY 1"))
+    if (nrow(t8) > 0) manager_groups <- as.character(t8$v)
     list(
       types = types,
       names = names_,
@@ -1796,7 +1817,8 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
       participants = participants,
       importance = importance,
       hospitals = hospitals,
-      research_groups = research_groups
+      research_groups = research_groups,
+      manager_groups = manager_groups
     )
   }, error = function(e) NULL)
 }
@@ -2017,7 +2039,7 @@ format_json_auto_merge_items <- function(field_label, keys) {
 # ---------- 甘特 SQL 筛选维度 / 行整理（原 server 内，每会话重复构造闭包；依赖 norm_progress，须在 app.R 定义 norm_progress 后 source 本文件） ----------
 
 # 甘特筛选：各维度子句列表；combine_mode 为 or 时用 OR 包成一组，为 and 时逐项 AND。同一维度内多选为 IN。与权限、归档条件仍为 AND。
-build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp, proj_ids_rg = integer(0)) {
+build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp, proj_ids_rg = integer(0), manager_group_ids = integer(0)) {
   p <- 0L
   or_parts <- character(0)
   params_stage <- list()
@@ -2064,6 +2086,12 @@ build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids
     ph <- make_ph(length(proj_ids_rg), p + 1L)
     or_parts <- c(or_parts, sprintf("project_db_id IN (%s)", ph))
     params_stage <- c(params_stage, as.list(proj_ids_rg))
+  }
+  if (length(manager_group_ids) > 0L) {
+    ph <- make_ph(length(manager_group_ids), p + 1L)
+    or_parts <- c(or_parts, sprintf("project_db_id IN (SELECT id FROM public.\"04项目总表\" WHERE \"05人员表_id\" IN (%s))", ph))
+    params_stage <- c(params_stage, as.list(manager_group_ids))
+    p <- p + length(manager_group_ids)
   }
   list(dim_parts = or_parts, params_stage = params_stage)
 }
@@ -2277,8 +2305,83 @@ validate_date_input <- function(x) {
     feedback_id = integer(0),
     decision_id = integer(0),
     executor_json = character(0),
+    feedback_type = character(0),
+    feedback_content = character(0),
+    feedback_reporters = character(0),
+    feedback_updated_at = character(0),
+    feedback_created_at = as.POSIXct(character(0)),
+    pending_exec_count = integer(0),
+    decision_count = integer(0),
+    is_decision_driven = logical(0),
     stringsAsFactors = FALSE
   )
+}
+
+.msg_reporters_from_json <- function(rj) {
+  tryCatch({
+    jj <- jsonlite::fromJSON(as.character(rj %||% "[]"), simplifyVector = TRUE)
+    if (is.null(jj) || length(jj) == 0L) {
+      ""
+    } else {
+      paste(as.character(jj), collapse = "、")
+    }
+  }, error = function(e) "")
+}
+
+.msg_group_member_work_ids <- function(conn, auth) {
+  pid <- suppressWarnings(as.integer(auth$personnel_id %||% NA_integer_))
+  if (is.na(pid) || is.null(conn) || !DBI::dbIsValid(conn)) return(character(0))
+  q <- paste(
+    'SELECT "工号" AS wid FROM public."05人员表"',
+    'WHERE "人员状态" = \'在职\'',
+    'AND "组别" IS NOT DISTINCT FROM (',
+    '  SELECT "组别" FROM public."05人员表" WHERE id = $1',
+    ')'
+  )
+  df <- tryCatch(DBI::dbGetQuery(conn, q, params = list(pid)), error = function(e) NULL)
+  if (is.null(df) || nrow(df) == 0L || !"wid" %in% names(df)) return(character(0))
+  out <- trimws(as.character(df$wid))
+  unique(out[nzchar(out)])
+}
+
+.msg_decision_visibility <- function(exec_df, auth, gm_work_ids) {
+  if (is.null(exec_df) || nrow(exec_df) == 0L) {
+    return(list(
+      include = FALSE,
+      watched_any = logical(0),
+      watched_pending = logical(0)
+    ))
+  }
+  keys <- as.character(exec_df$key %||% "")
+  sts <- trimws(as.character(exec_df$状态 %||% ""))
+  watched_any <- rep(FALSE, length(keys))
+  if (isTRUE(auth$allow_all)) {
+    watched_any <- nzchar(keys)
+  } else if (isTRUE(auth$can_manage_project)) {
+    if (length(gm_work_ids) > 0L) {
+      watched_any <- vapply(keys, function(k) {
+        any(vapply(gm_work_ids, function(wid) grepl(paste0("-", wid, "$"), k), logical(1)))
+      }, logical(1))
+    }
+  } else {
+    wid <- trimws(as.character(auth$work_id %||% ""))
+    if (nzchar(wid)) watched_any <- grepl(paste0("-", wid, "$"), keys)
+  }
+  watched_pending <- watched_any & sts == "未执行"
+  list(
+    include = any(watched_any),
+    watched_any = watched_any,
+    watched_pending = watched_pending
+  )
+}
+
+.msg_priority_for_decision_driven <- function(watched_pending_count, oldest_days) {
+  if (is.na(watched_pending_count)) watched_pending_count <- 0L
+  if (is.na(oldest_days)) oldest_days <- 0L
+  if (watched_pending_count >= 3L || oldest_days > 30L) return("critical")
+  if (watched_pending_count >= 2L || oldest_days > 14L) return("high")
+  if (watched_pending_count >= 1L || oldest_days > 7L) return("medium")
+  "low"
 }
 
 # M1/M5/M6/M7/M8：阶段相关消息（合并为一条 SQL）
@@ -2384,6 +2487,14 @@ validate_date_input <- function(x) {
         feedback_id = NA_integer_,
         decision_id = NA_integer_,
         executor_json = NA_character_,
+        feedback_type = NA_character_,
+        feedback_content = NA_character_,
+        feedback_reporters = NA_character_,
+        feedback_updated_at = NA_character_,
+        feedback_created_at = as.POSIXct(NA),
+        pending_exec_count = 0L,
+        decision_count = 0L,
+        is_decision_driven = FALSE,
         stringsAsFactors = FALSE
       )
     }
@@ -2413,6 +2524,14 @@ validate_date_input <- function(x) {
         feedback_id = NA_integer_,
         decision_id = NA_integer_,
         executor_json = NA_character_,
+        feedback_type = NA_character_,
+        feedback_content = NA_character_,
+        feedback_reporters = NA_character_,
+        feedback_updated_at = NA_character_,
+        feedback_created_at = as.POSIXct(NA),
+        pending_exec_count = 0L,
+        decision_count = 0L,
+        is_decision_driven = FALSE,
         stringsAsFactors = FALSE
       )
     }
@@ -2443,6 +2562,14 @@ validate_date_input <- function(x) {
           feedback_id = NA_integer_,
           decision_id = NA_integer_,
           executor_json = NA_character_,
+          feedback_type = NA_character_,
+          feedback_content = NA_character_,
+          feedback_reporters = NA_character_,
+          feedback_updated_at = NA_character_,
+          feedback_created_at = as.POSIXct(NA),
+          pending_exec_count = 0L,
+          decision_count = 0L,
+          is_decision_driven = FALSE,
           stringsAsFactors = FALSE
         )
       }
@@ -2454,10 +2581,11 @@ validate_date_input <- function(x) {
 }
 
 # M3/M4：近期卡点与问题
-.fetch_feedback_personal_msgs <- function(conn, and_auth, today, days_back) {
+.fetch_feedback_personal_msgs <- function(conn, auth, and_auth, today, days_back) {
   if (is.null(conn) || !DBI::dbIsValid(conn)) return(.empty_msg_df())
+  if (is.null(auth) || isTRUE(auth$allow_none)) return(.empty_msg_df())
   q <- paste0("
-    SELECT f.id AS feedback_id, f.\"类型\", f.\"内容\", f.created_at,
+    SELECT f.id AS feedback_id, f.\"类型\", f.\"内容\", f.created_at, f.\"更新日期\",
            f.reporters_json::text AS rj,
            g.\"项目名称\", g.id AS project_db_id,
            g.\"项目类型\", g.\"重要紧急程度\",
@@ -2469,153 +2597,125 @@ validate_date_input <- function(x) {
     LEFT JOIN public.\"05人员表\" p ON p.id = g.\"05人员表_id\"
     LEFT JOIN public.\"09项目阶段实例表\" si ON si.id = f.\"09项目阶段实例表_id\"
     LEFT JOIN public.\"08项目阶段定义表\" d ON d.id = si.stage_def_id
-    WHERE f.\"类型\" IN ('卡点', '问题')
-      AND f.created_at >= CURRENT_DATE - (", days_back, " || ' days')::interval
-      AND COALESCE(g.\"is_active\", TRUE) = TRUE", and_auth, "
+    WHERE COALESCE(g.\"is_active\", TRUE) = TRUE", and_auth, "
     ORDER BY f.created_at DESC
   ")
   df <- tryCatch(DBI::dbGetQuery(conn, q), error = function(e) NULL)
   if (is.null(df) || nrow(df) == 0L) return(.empty_msg_df())
+  fb_ids <- unique(suppressWarnings(as.integer(df$feedback_id)))
+  fb_ids <- fb_ids[!is.na(fb_ids) & fb_ids > 0L]
+  dec_by_fid <- fetch_decisions_linked_to_feedback_ids(conn, fb_ids)
+  gm_work_ids <- if (isTRUE(auth$can_manage_project) && !isTRUE(auth$allow_all)) {
+    .msg_group_member_work_ids(conn, auth)
+  } else {
+    character(0)
+  }
 
   rows <- list()
   for (i in seq_len(nrow(df))) {
-    typ <- as.character(df[["类型"]][i])
-    content <- as.character(df[["内容"]][i])
-    pname <- as.character(df[["项目名称"]][i])
-    sname <- as.character(df$stage_name[i])
-    imp <- as.character(df[["重要紧急程度"]][i])
+    fid <- suppressWarnings(as.integer(df$feedback_id[i]))
+    if (is.na(fid) || fid <= 0L) next
+    typ <- trimws(as.character(df[["类型"]][i] %||% ""))
+    content <- as.character(df[["内容"]][i] %||% "")
+    pname <- as.character(df[["项目名称"]][i] %||% "")
+    sname <- as.character(df$stage_name[i] %||% "")
+    imp <- as.character(df[["重要紧急程度"]][i] %||% "")
     ptype <- as.character(df[["项目类型"]][i] %||% "")
     pmgr <- as.character(df$manager_name[i] %||% "")
     created <- as.POSIXct(df$created_at[i])
+    updated_at <- as.character(df[["更新日期"]][i] %||% "")
     if (is.na(created)) next
     days_ago <- as.integer(difftime(today, as.Date(created), units = "days"))
     if (is.na(days_ago)) days_ago <- 0L
 
-    # 解析报告人
-    rj <- df[["rj"]][i]
-    reporters <- tryCatch({
-      jj <- jsonlite::fromJSON(rj, simplifyVector = TRUE)
-      if (is.null(jj)) "" else paste(as.character(jj), collapse = "、")
-    }, error = function(e) "")
-
-    cat_label <- if (identical(typ, "卡点")) "近期卡点" else "近期问题"
-
-    if (identical(typ, "卡点")) {
-      pri <- if (grepl("重要|紧急", imp) || days_ago > 7L) "critical"
-             else if (days_ago > 3L) "high"
-             else if (days_ago > 1L) "medium"
-             else "low"
-    } else {
-      pri <- if (days_ago > 7L) "high"
-             else if (days_ago > 3L) "medium"
-             else "low"
+    reporters <- .msg_reporters_from_json(df[["rj"]][i])
+    dec_df <- dec_by_fid[[as.character(fid)]]
+    if (is.null(dec_df) || nrow(dec_df) == 0L) {
+      dec_df <- data.frame(
+        decision_id = integer(0),
+        meeting_label = character(0),
+        decision_content = character(0),
+        exec_json = character(0),
+        meeting_time = as.POSIXct(character(0)),
+        stringsAsFactors = FALSE
+      )
     }
+    dec_count <- nrow(dec_df)
+    watched_pending_count <- 0L
+    watched_any_count <- 0L
+    mtg_days <- integer(0)
+    for (di in seq_len(dec_count)) {
+      exec_df <- parse_executor_json(dec_df$exec_json[di])
+      vis <- .msg_decision_visibility(exec_df, auth, gm_work_ids)
+      watched_pending_count <- watched_pending_count + sum(vis$watched_pending, na.rm = TRUE)
+      watched_any_count <- watched_any_count + sum(vis$watched_any, na.rm = TRUE)
+      mt <- as.POSIXct(dec_df$meeting_time[di])
+      if (!is.na(mt)) mtg_days <- c(mtg_days, as.integer(difftime(today, as.Date(mt), units = "days")))
+    }
+    oldest_days <- if (length(mtg_days) > 0L) max(mtg_days, na.rm = TRUE) else 0L
 
-    msg <- paste0(
-      if (nzchar(sname)) paste0("[", sname, "] ") else "",
-      typ, ": ", substr(content, 1, 80),
-      if (nzchar(reporters)) paste0(" (报告人: ", reporters, ")") else ""
-    )
+    is_issue_type <- typ %in% c("卡点", "问题")
+    include_row <- FALSE
+    cat_label <- "待执行决策"
+    pri <- "low"
+    sort_key <- 0.1
+    is_decision_driven <- FALSE
+    if (is_issue_type) {
+      include_row <- days_ago <= as.integer(days_back)
+      cat_label <- if (identical(typ, "卡点")) "近期卡点" else "近期问题"
+      if (identical(typ, "卡点")) {
+        pri <- if (grepl("重要|紧急", imp) || days_ago > 7L) "critical"
+               else if (days_ago > 3L) "high"
+               else if (days_ago > 1L) "medium"
+               else "low"
+      } else {
+        pri <- if (days_ago > 7L) "high"
+               else if (days_ago > 3L) "medium"
+               else "low"
+      }
+      sort_key <- days_ago + 0.4
+    } else {
+      include_row <- watched_any_count > 0L
+      if (include_row) {
+        pri <- .msg_priority_for_decision_driven(watched_pending_count, oldest_days)
+        sort_key <- watched_pending_count * 100 + oldest_days + 0.8
+      }
+      is_decision_driven <- TRUE
+    }
+    if (!include_row) next
 
     rows[[length(rows) + 1L]] <- data.frame(
       category = cat_label,
       priority = pri,
       project_name = pname,
       stage_name = if (nzchar(sname)) sname else "",
-      message_text = msg,
+      message_text = paste0(
+        if (nzchar(sname)) paste0("[", sname, "] ") else "",
+        if (nzchar(typ)) paste0(typ, ": ") else "",
+        substr(content, 1, 80),
+        if (nchar(content) > 80L) "..." else "",
+        if (nzchar(reporters)) paste0(" (反馈人: ", reporters, ")") else ""
+      ),
       related_date = as.Date(created),
       days_value = days_ago,
-      sort_key = days_ago + 0.4,
+      sort_key = sort_key,
       project_type = ptype,
       importance = imp,
       manager_name = pmgr,
       project_db_id = suppressWarnings(as.integer(df$project_db_id[i])),
       stage_instance_id = suppressWarnings(as.integer(df$stage_instance_id[i] %||% NA_integer_)),
       task_key = as.character(df$task_key[i] %||% ""),
-      feedback_id = suppressWarnings(as.integer(df$feedback_id[i])),
+      feedback_id = fid,
       decision_id = NA_integer_,
       executor_json = NA_character_,
-      stringsAsFactors = FALSE
-    )
-  }
-
-  if (length(rows) == 0L) return(.empty_msg_df())
-  do.call(rbind, rows)
-}
-
-# M2：待执行的会议决策
-# common_user: 仅展示自己作为执行人且状态为"未执行"的决策
-# 领导(manager/super_admin/group_manager): 展示职权范围内所有含"未执行"执行人的决策（去重，一条决策只算一次）
-.fetch_meeting_action_msgs <- function(conn, auth, and_auth_meeting, today) {
-  if (is.null(conn) || !DBI::dbIsValid(conn)) return(.empty_msg_df())
-  if (is.null(auth) || !nzchar(auth$work_id)) return(.empty_msg_df())
-
-  is_leader <- isTRUE(auth$can_manage_project)
-  wid <- auth$work_id
-
-  q <- paste0("
-    SELECT t.id, t.\"会议名称\", t.\"会议时间\", t.\"决策内容\",
-           t.\"决策执行人及执行确认\"::text AS exec_json
-    FROM public.\"10会议决策表\" t
-    WHERE t.\"决策执行人及执行确认\" IS NOT NULL", and_auth_meeting, "
-    ORDER BY t.\"会议时间\" DESC NULLS LAST
-  ")
-  df <- tryCatch(DBI::dbGetQuery(conn, q), error = function(e) NULL)
-  if (is.null(df) || nrow(df) == 0L) return(.empty_msg_df())
-
-  rows <- list()
-  for (i in seq_len(nrow(df))) {
-    ej <- as.character(df$exec_json[i])
-    exec_df <- parse_executor_json(ej)
-    if (nrow(exec_df) == 0L) next
-
-    pending_df <- exec_df[trimws(as.character(exec_df[["状态"]])) == "未执行", , drop = FALSE]
-    if (nrow(pending_df) == 0L) next
-
-    if (!is_leader) {
-      # 普通用户：只看自己作为执行人且未执行的
-      my_rows <- pending_df[grepl(paste0("-", wid, "$"), pending_df$key), , drop = FALSE]
-      if (nrow(my_rows) == 0L) next
-    }
-    # 领导：只要该决策有任何"未执行"的执行人就纳入（去重，一条决策一次）
-
-    mtg_name <- as.character(df[["会议名称"]][i])
-    mtg_time <- as.POSIXct(df[["会议时间"]][i])
-    decision <- as.character(df[["决策内容"]][i])
-    days_since <- if (!is.na(mtg_time)) as.integer(difftime(today, as.Date(mtg_time), units = "days")) else 0L
-    if (is.na(days_since)) days_since <- 0L
-
-    pri <- if (days_since > 30L) "critical"
-           else if (days_since > 14L) "high"
-           else if (days_since > 7L) "medium"
-           else "low"
-
-    mtg_label <- if (nzchar(mtg_name)) mtg_name else "会议"
-    mtg_date_str <- if (!is.na(mtg_time)) format(as.Date(mtg_time), "%Y-%m-%d") else "未知日期"
-
-    # 附加未执行执行人摘要
-    pending_names <- vapply(pending_df$key, executor_display_name_from_key, character(1))
-    pending_summary <- paste(pending_names, collapse = "、")
-
-    rows[[length(rows) + 1L]] <- data.frame(
-      category = "待执行决策",
-      priority = pri,
-      project_name = paste0(mtg_label, " (", mtg_date_str, ")"),
-      stage_name = "",
-      message_text = paste0("决策: ", substr(decision, 1, 60), if (nchar(decision) > 60) "..." else "",
-                            " | 待执行: ", pending_summary),
-      related_date = if (!is.na(mtg_time)) as.Date(mtg_time) else today,
-      days_value = days_since,
-      sort_key = days_since + 0.6,
-      project_type = "",
-      importance = "",
-      manager_name = "",
-      project_db_id = NA_integer_,
-      stage_instance_id = NA_integer_,
-      task_key = NA_character_,
-      feedback_id = NA_integer_,
-      decision_id = as.integer(df$id[i]),
-      executor_json = ej,
+      feedback_type = typ,
+      feedback_content = content,
+      feedback_reporters = reporters,
+      feedback_updated_at = updated_at,
+      feedback_created_at = created,
+      pending_exec_count = as.integer(watched_pending_count),
+      decision_count = as.integer(dec_count),
+      is_decision_driven = is_decision_driven,
       stringsAsFactors = FALSE
     )
   }
@@ -2630,14 +2730,12 @@ fetch_personal_messages <- function(conn, auth, days_back = 14L) {
   if (is.null(auth) || isTRUE(auth$allow_none)) return(.empty_msg_df())
 
   and_auth <- if (auth$allow_all) "" else paste0(' AND g.id IN (', auth$allowed_subquery, ')')
-  and_auth_meeting <- meeting_decision_auth_sql(auth)
   today <- today_beijing()
 
   stage_msgs <- .fetch_stage_personal_msgs(conn, and_auth, today)
-  feedback_msgs <- .fetch_feedback_personal_msgs(conn, and_auth, today, as.integer(days_back))
-  meeting_msgs <- .fetch_meeting_action_msgs(conn, auth, and_auth_meeting, today)
+  feedback_msgs <- .fetch_feedback_personal_msgs(conn, auth, and_auth, today, as.integer(days_back))
 
-  all_msgs <- rbind(stage_msgs, feedback_msgs, meeting_msgs)
+  all_msgs <- rbind(stage_msgs, feedback_msgs)
   if (nrow(all_msgs) == 0L) return(.empty_msg_df())
 
   # 按优先级排序
