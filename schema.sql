@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 514gIEbOE4PyTgI1p6lLceCYidXOA7WCBk8xEvStUtqbMPnt8SHHqP9hzhwam5q
+\restrict 4PfUwdN1UdXvK1htAaDng7DuPSckRaP8n9E9f0pvuPvHZpX1tYrxUGiLecZAfZD
 
 -- Dumped from database version 15.15 (Debian 15.15-1.pgdg13+1)
 -- Dumped by pg_dump version 15.15 (Debian 15.15-1.pgdg13+1)
@@ -362,7 +362,8 @@ CREATE TABLE public."04项目总表" (
     "05人员表_id" integer,
     "重要紧急程度" text,
     is_active boolean DEFAULT true,
-    milestones_json jsonb
+    milestones_json jsonb,
+    "课题组" text DEFAULT '无'::text
 );
 
 
@@ -6332,5 +6333,5 @@ ALTER TABLE ONLY public."03医院_项目表"
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 514gIEbOE4PyTgI1p6lLceCYidXOA7WCBk8xEvStUtqbMPnt8SHHqP9hzhwam5q
+\unrestrict 4PfUwdN1UdXvK1htAaDng7DuPSckRaP8n9E9f0pvuPvHZpX1tYrxUGiLecZAfZD
 

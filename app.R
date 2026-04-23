@@ -877,6 +877,7 @@ ui <- fluidPage(
                     selectInput("filter_manager", "项目负责人", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                     selectInput("filter_participant", "项目参与人员", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                     selectInput("filter_importance", "重要紧急程度", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+                    selectInput("filter_research_group", "课题组", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                     selectInput("filter_hospital", "相关医院（有中心）", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                     div(
                       style = "margin-top: 6px; font-size: 14px;",
@@ -1274,6 +1275,7 @@ server <- function(input, output, session) {
       manager = input$filter_manager,
       participant = input$filter_participant,
       importance = input$filter_importance,
+      research_group = input$filter_research_group,
       hospital = input$filter_hospital,
       include_archived = input$filter_include_archived,
       combine_mode = {
@@ -1323,6 +1325,7 @@ server <- function(input, output, session) {
     fp <- if (is.null(state$participant)) character(0) else state$participant
     fi <- if (is.null(state$importance)) character(0) else state$importance
     fh <- if (is.null(state$hospital)) character(0) else state$hospital
+    frg <- if (is.null(state$research_group)) character(0) else state$research_group
     manager_ids <- integer(0)
     if (length(fm) > 0) {
       qm <- paste0('SELECT id FROM public."05人员表" WHERE "姓名" IN (', paste(rep("$", length(fm)), seq_along(fm), sep = "", collapse = ","), ")")
@@ -1342,9 +1345,14 @@ server <- function(input, output, session) {
       qh <- paste0('SELECT DISTINCT s."project_table 项目总表_id" FROM public."03医院_项目表" s INNER JOIN public."01医院信息表" h ON s."01_hos_resource_table医院信息表_id" = h.id WHERE h."医院名称" IN (', paste(rep("$", length(fh)), seq_along(fh), sep = "", collapse = ","), ")")
       proj_ids_hosp <- DBI::dbGetQuery(pg_con, qh, params = as.list(fh))[["project_table 项目总表_id"]]
     }
+    proj_ids_rg <- integer(0)
+    if (length(frg) > 0) {
+      qrg <- paste0('SELECT id FROM public."04项目总表" WHERE "课题组" IN (', paste(rep("$", length(frg)), seq_along(frg), sep = "", collapse = ","), ")")
+      proj_ids_rg <- DBI::dbGetQuery(pg_con, qrg, params = as.list(frg))$id
+    }
     where_stage <- c('project_id IS NOT NULL', 'project_type IS NOT NULL')
     if (!auth$allow_all) where_stage <- c(where_stage, paste0("project_db_id IN (", auth$allowed_subquery, ")"))
-    dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp)
+    dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp, proj_ids_rg)
     combine_mode <- if (is.null(state$combine_mode)) "and" else state$combine_mode
     if (length(dim_built$dim_parts) > 0L) {
       if (identical(combine_mode, "or")) {
@@ -1437,6 +1445,7 @@ server <- function(input, output, session) {
       fm <- input$filter_manager
       fp <- input$filter_participant
       fi <- input$filter_importance
+      frg <- input$filter_research_group
       fh <- input$filter_hospital
     })
     updateSelectInput(session, "filter_type", choices = opts$types, selected = sel_intersect_choices(ft, opts$types))
@@ -1444,8 +1453,9 @@ server <- function(input, output, session) {
     updateSelectInput(session, "filter_manager", choices = opts$managers, selected = sel_intersect_choices(fm, opts$managers))
     updateSelectInput(session, "filter_participant", choices = opts$participants, selected = sel_intersect_choices(fp, opts$participants))
     updateSelectInput(session, "filter_importance", choices = opts$importance, selected = sel_intersect_choices(fi, opts$importance))
+    updateSelectInput(session, "filter_research_group", choices = opts$research_groups, selected = sel_intersect_choices(frg, opts$research_groups))
     updateSelectInput(session, "filter_hospital", choices = opts$hospitals, selected = sel_intersect_choices(fh, opts$hospitals))
-    ivd_perf_elapsed(t0_fs, "observe gantt_filter updateSelectInput×6")
+    ivd_perf_elapsed(t0_fs, "observe gantt_filter updateSelectInput×8")
   })
 
   # 新建会议：甘特同款维度筛「选择项目」下拉选项
@@ -1466,6 +1476,7 @@ server <- function(input, output, session) {
       fm <- input$mtg_new_filter_manager
       fp <- input$mtg_new_filter_participant
       fi <- input$mtg_new_filter_importance
+      frg <- input$mtg_new_filter_research_group
       fh <- input$mtg_new_filter_hospital
     })
     updateSelectInput(session, "mtg_new_filter_type", choices = opts$types, selected = sel_intersect_choices(ft, opts$types))
@@ -1473,6 +1484,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "mtg_new_filter_manager", choices = opts$managers, selected = sel_intersect_choices(fm, opts$managers))
     updateSelectInput(session, "mtg_new_filter_participant", choices = opts$participants, selected = sel_intersect_choices(fp, opts$participants))
     updateSelectInput(session, "mtg_new_filter_importance", choices = opts$importance, selected = sel_intersect_choices(fi, opts$importance))
+    updateSelectInput(session, "mtg_new_filter_research_group", choices = opts$research_groups, selected = sel_intersect_choices(frg, opts$research_groups))
     updateSelectInput(session, "mtg_new_filter_hospital", choices = opts$hospitals, selected = sel_intersect_choices(fh, opts$hospitals))
   })
 
@@ -1486,6 +1498,7 @@ server <- function(input, output, session) {
       manager = if (is.null(input$mtg_new_filter_manager)) character(0) else input$mtg_new_filter_manager,
       participant = if (is.null(input$mtg_new_filter_participant)) character(0) else input$mtg_new_filter_participant,
       importance = if (is.null(input$mtg_new_filter_importance)) character(0) else input$mtg_new_filter_importance,
+      research_group = if (is.null(input$mtg_new_filter_research_group)) character(0) else input$mtg_new_filter_research_group,
       hospital = if (is.null(input$mtg_new_filter_hospital)) character(0) else input$mtg_new_filter_hospital,
       include_archived = isTRUE(input$mtg_new_filter_include_archived),
       combine_mode = {
@@ -1505,7 +1518,7 @@ server <- function(input, output, session) {
     base <- meeting_new_build_project_choices(pg_con, auth)
     ids <- meeting_new_project_ids_by_gantt_dims(
       pg_con, auth,
-      st$type, st$name, st$manager, st$participant, st$importance, st$hospital,
+      st$type, st$name, st$manager, st$participant, st$importance, st$hospital, st$research_group,
       st$include_archived, st$combine_mode
     )
     meeting_new_intersect_project_choices(base, ids)
@@ -3588,12 +3601,6 @@ server <- function(input, output, session) {
           sliderInput("edit_progress", "调整当前实际进度：", 0, 100, round((if (is.null(ctx$progress)) 0 else ctx$progress) * 100), post = "%")
         ),
         column(6,
-          selectInput("edit_importance", "项目紧急程度：",
-            choices = c("重要紧急", "重要不紧急", "紧急不重要", "不重要不紧急"),
-            selected = {
-              cur <- if (is.null(ctx$importance) || is.na(ctx$importance)) "" else trimws(ctx$importance)
-              if (cur %in% c("重要紧急", "重要不紧急", "紧急不重要", "不重要不紧急")) cur else "重要紧急"
-            }),
           uiOutput("remark_editor"),
           actionButton("btn_add_remark_row", "新增问题/卡点/经验分享", class = "btn-success"),
           uiOutput("sample_pairs_editor")
@@ -3697,7 +3704,7 @@ server <- function(input, output, session) {
         id = "pc_tabs",
         tabPanel("参与人员管理", value = "tab_personnel", uiOutput("pc_personnel_ui")),
         tabPanel("临床中心管理", value = "tab_center",    uiOutput("pc_center_ui")),
-        tabPanel("修改项目名称", value = "tab_proj_name", uiOutput("pc_proj_name_ui"))
+        tabPanel("修改项目名称/课题组/重要紧急程度", value = "tab_proj_name", uiOutput("pc_proj_name_ui"))
       )
     ))
   })
@@ -3891,7 +3898,8 @@ server <- function(input, output, session) {
       inst <- DBI::dbGetQuery(pg_con, q09, params = list(proj_id, scope_row))
       is_active_true <- nrow(inst) > 0L & !is.na(inst$is_active) & (inst$is_active == TRUE | as.character(inst$is_active) == "t")
       active_ids <- if (nrow(inst) > 0L) as.integer(inst$stage_def_id[is_active_true]) else integer(0)
-      can_rename <- pt == "验证" && (isTRUE(ctx$is_super_admin) || isTRUE(ctx$can_manage_project))
+      # 仅「验证」项目，且仅为该项目 04 表负责人（或 super_admin）；不按 can_manage_project 放开
+      can_rename <- pt == "验证" && (isTRUE(ctx$is_super_admin) || is_current_user_project_manager(ctx$proj_row_id))
       tagList(
         tags$p(tags$b("项目："), ctx$project_id, " | ", tags$b("中心："), ctx$site_name),
         tags$p(tags$small("勾选表示该维度下该阶段实例参与甘特展示；取消勾选仅置 is_active=FALSE，不删行。")),
@@ -3968,7 +3976,7 @@ server <- function(input, output, session) {
     ctx <- stage_maintain_context(); req(ctx)
     if (ctx$project_type != "验证") return()
     auth <- current_user_auth()
-    if (!isTRUE(auth$is_super_admin) && !isTRUE(auth$can_manage_project)) return()
+    if (!isTRUE(auth$is_super_admin) && !is_current_user_project_manager(ctx$proj_row_id)) return()
     scope_row <- if (ctx$is_sync) 0L else as.integer(ctx$site_row_id)
     cur <- tryCatch({
       r <- DBI::dbGetQuery(pg_con,
@@ -3996,7 +4004,8 @@ server <- function(input, output, session) {
     if (is.null(did)) return()
     ctx <- stage_maintain_context(); req(ctx)
     auth <- current_user_auth()
-    if (!isTRUE(auth$is_super_admin) && !isTRUE(auth$can_manage_project)) return()
+    if (ctx$project_type != "验证") return()
+    if (!isTRUE(auth$is_super_admin) && !is_current_user_project_manager(ctx$proj_row_id)) return()
     new_nm <- trimws(as.character(input$sm09_rename_input %||% ""))
     if (!nzchar(new_nm)) new_nm <- NULL
     scope_row <- if (ctx$is_sync) 0L else as.integer(ctx$site_row_id)
@@ -4249,29 +4258,52 @@ server <- function(input, output, session) {
     }, error = function(e) showNotification(paste0("新增中心失败：", conditionMessage(e)), type = "error"))
   })
 
-  # ---------- Tab3: 修改项目名称 ----------
+  # ---------- Tab3: 修改项目名称 / 课题组 / 重要紧急程度 ----------
   output$pc_proj_name_ui <- renderUI({
     ctx <- personnel_center_context()
     req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    auth <- current_user_auth()
+    and_04 <- if (isTRUE(auth$allow_all)) "" else paste0(" AND id IN (", auth$allowed_subquery, ")")
     tryCatch({
       cur_row <- DBI::dbGetQuery(pg_con,
-        'SELECT "\u9879\u76ee\u540d\u79f0" FROM public."\u0030\u0034\u9879\u76ee\u603b\u8868" WHERE id = $1',
+        'SELECT "项目名称", "课题组", "重要紧急程度" FROM public."04项目总表" WHERE id = $1',
         params = list(as.integer(ctx$proj_row_id)))
-      cur_name <- if (nrow(cur_row) > 0 && !is.na(cur_row[[1]][1]))
-                    as.character(cur_row[[1]][1]) else ""
+      cur_name <- if (nrow(cur_row) > 0 && !is.na(cur_row[["项目名称"]][1]))
+                    as.character(cur_row[["项目名称"]][1]) else ""
+      cur_rg <- if (nrow(cur_row) > 0 && "课题组" %in% names(cur_row) && !is.na(cur_row[["课题组"]][1]))
+                    trimws(as.character(cur_row[["课题组"]][1])) else "无"
+      cur_imp <- if (nrow(cur_row) > 0 && !is.na(cur_row[["重要紧急程度"]][1]))
+                    trimws(as.character(cur_row[["重要紧急程度"]][1])) else ""
+      imp_choices <- c("重要紧急", "重要不紧急", "紧急不重要", "不重要不紧急")
+      if (!nzchar(cur_imp) || !(cur_imp %in% imp_choices)) cur_imp <- "重要紧急"
+
+      rg_dist <- DBI::dbGetQuery(pg_con,
+        paste0('SELECT DISTINCT "课题组" AS v FROM public."04项目总表" WHERE "课题组" IS NOT NULL', and_04, " ORDER BY 1"))
+      rg_choices <- if (nrow(rg_dist) > 0) as.character(rg_dist$v) else character(0)
+      if (length(rg_choices) == 0L) rg_choices <- "无"
+      if (!(cur_rg %in% rg_choices)) rg_choices <- unique(c(rg_choices, cur_rg))
+
       tagList(
         tags$p(style = "color:#666; font-size:13px; margin-bottom:12px;",
-               "\u4fee\u6539\u540e\u70b9\u51fb\u300c\u4fdd\u5b58\u9879\u76ee\u540d\u79f0\u300d\u4f7f\u66f4\u6539\u751f\u6548\u3002"),
+               "修改后点击「保存」使更改生效。"),
         fluidRow(
-          column(8,
-            textInput("pc_proj_name_input", "\u9879\u76ee\u540d\u79f0",
+          column(12,
+            textInput("pc_proj_name_input", "项目名称",
                       value = cur_name, width = "100%",
-                      placeholder = "\u8bf7\u8f93\u5165\u9879\u76ee\u540d\u79f0")
+                      placeholder = "请输入项目名称")
+          ),
+          column(12,
+            selectInput("pc_proj_research_group", "课题组",
+                        choices = rg_choices, selected = cur_rg, width = "100%")
+          ),
+          column(12,
+            selectInput("pc_proj_importance", "重要紧急程度",
+                        choices = imp_choices, selected = cur_imp, width = "100%")
           )
         ),
-        actionButton("btn_save_proj_name", "\u4fdd\u5b58\u9879\u76ee\u540d\u79f0", class = "btn-primary")
+        actionButton("btn_save_proj_name", "保存", class = "btn-primary")
       )
-    }, error = function(e) tags$p(style = "color:red;", paste0("\u52a0\u8f7d\u5931\u8d25\uff1a", conditionMessage(e))))
+    }, error = function(e) tags$p(style = "color:red;", paste0("加载失败：", conditionMessage(e))))
   })
 
   observeEvent(input$btn_save_proj_name, {
@@ -4279,41 +4311,89 @@ server <- function(input, output, session) {
     if (!isTRUE(auth$can_manage_project)) return()
     ctx <- personnel_center_context()
     req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
-    proj_id  <- as.integer(ctx$proj_row_id)
+    proj_id <- as.integer(ctx$proj_row_id)
     new_name <- trimws(input$pc_proj_name_input %||% "")
+    new_rg <- trimws(as.character(input$pc_proj_research_group %||% ""))
+    new_imp <- trimws(as.character(input$pc_proj_importance %||% ""))
+    imp_choices <- c("重要紧急", "重要不紧急", "紧急不重要", "不重要不紧急")
     if (!nzchar(new_name)) {
-      showNotification("\u9879\u76ee\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a\u3002", type = "warning")
+      showNotification("项目名称不能为空。", type = "warning")
       return()
     }
+    if (!(new_imp %in% imp_choices)) new_imp <- "重要紧急"
+    if (!nzchar(new_rg)) new_rg <- "无"
+
     tryCatch({
       dup <- DBI::dbGetQuery(pg_con,
-        'SELECT id FROM public."\u0030\u0034\u9879\u76ee\u603b\u8868" WHERE "\u9879\u76ee\u540d\u79f0" = $1 AND id != $2',
+        'SELECT id FROM public."04项目总表" WHERE "项目名称" = $1 AND id != $2',
         params = list(new_name, proj_id))
       if (nrow(dup) > 0) {
-        showNotification("\u5df2\u5b58\u5728\u540c\u540d\u9879\u76ee\uff0c\u8bf7\u4f7f\u7528\u4e0d\u540c\u7684\u9879\u76ee\u540d\u79f0\u3002", type = "warning")
+        showNotification("已存在同名项目，请使用不同的项目名称。", type = "warning")
         return()
       }
-      old_name <- ctx$project_id
-      DBI::dbExecute(pg_con,
-        'UPDATE public."\u0030\u0034\u9879\u76ee\u603b\u8868" SET "\u9879\u76ee\u540d\u79f0" = $1 WHERE id = $2',
-        params = list(new_name, proj_id))
+
+      result <- pool::poolWithTransaction(pg_con, function(conn) {
+        locked <- fetch_row_snapshot(conn, "04项目总表", proj_id,
+          c("项目名称", "课题组", "重要紧急程度"), lock = TRUE)
+        if (is.null(locked)) stop("项目不存在。")
+        updates <- list()
+        if (!identical(normalize_text(new_name), normalize_text(locked[["项目名称"]]))) updates[["项目名称"]] <- new_name
+        if (!identical(normalize_text(new_rg), normalize_text(locked[["课题组"]]))) updates[["课题组"]] <- new_rg
+        if (!identical(normalize_text(new_imp), normalize_text(locked[["重要紧急程度"]]))) updates[["重要紧急程度"]] <- new_imp
+        if (length(updates) == 0L) return(list(skip = TRUE))
+
+        execute_updates(conn, "04项目总表", proj_id, updates)
+        old_audit <- list(
+          项目名称 = locked[["项目名称"]],
+          课题组 = locked[["课题组"]],
+          重要紧急程度 = locked[["重要紧急程度"]]
+        )
+        new_audit <- old_audit
+        for (nm in names(updates)) new_audit[[nm]] <- updates[[nm]]
+        list(skip = FALSE, old_audit = old_audit, new_audit = new_audit, updates = updates, new_name = new_name)
+      })
+
+      if (isTRUE(result$skip)) {
+        showNotification("未检测到变更。", type = "message")
+        return()
+      }
+
+      parts <- character(0)
+      if ("项目名称" %in% names(result$updates)) {
+        parts <- c(parts, sprintf(
+          "项目名称 %s→%s",
+          ifelse(is.na(result$old_audit$项目名称), "（空）", result$old_audit$项目名称),
+          ifelse(is.na(result$new_audit$项目名称), "（空）", result$new_audit$项目名称)))
+      }
+      if ("课题组" %in% names(result$updates)) {
+        parts <- c(parts, sprintf(
+          "课题组 %s→%s",
+          ifelse(is.na(result$old_audit$课题组), "（空）", result$old_audit$课题组),
+          ifelse(is.na(result$new_audit$课题组), "（空）", result$new_audit$课题组)))
+      }
+      if ("重要紧急程度" %in% names(result$updates)) {
+        parts <- c(parts, sprintf(
+          "重要紧急程度 %s→%s",
+          ifelse(is.na(result$old_audit$重要紧急程度), "（空）", result$old_audit$重要紧急程度),
+          ifelse(is.na(result$new_audit$重要紧急程度), "（空）", result$new_audit$重要紧急程度)))
+      }
+      summary_txt <- paste(parts, collapse = "；")
+
       insert_audit_log(
         pg_con, auth$work_id, auth$name,
-        "UPDATE", "04\u9879\u76ee\u603b\u8868", proj_id,
-        sprintf("\u4fee\u6539\u9879\u76ee\u540d\u79f0 %s -> %s", old_name, new_name),
-        sprintf("\u9879\u76ee\u540d\u79f0: %s -> %s", old_name, new_name),
-        list("\u9879\u76ee\u540d\u79f0" = old_name),
-        list("\u9879\u76ee\u540d\u79f0" = new_name)
+        "UPDATE", "04项目总表", proj_id,
+        "项目基本信息", summary_txt,
+        result$old_audit, result$new_audit
       )
-      # \u66f4\u65b0 context \u4e2d\u7684\u9879\u76ee\u540d\u79f0\uff0c\u4f7f\u5f39\u7a97\u6807\u9898\u5237\u65b0
+
       personnel_center_context(list(
         proj_row_id = proj_id,
-        project_id  = new_name
+        project_id  = result$new_name
       ))
-      showNotification(sprintf("\u9879\u76ee\u540d\u79f0\u5df2\u66f4\u65b0\u4e3a\uff1a%s", new_name), type = "message")
+      showNotification("项目信息已保存。", type = "message")
       gantt_use_incremental(TRUE)
       gantt_force_refresh(gantt_force_refresh() + 1L)
-    }, error = function(e) showNotification(paste0("\u4fdd\u5b58\u5931\u8d25\uff1a", conditionMessage(e)), type = "error"))
+    }, error = function(e) showNotification(paste0("保存失败：", conditionMessage(e)), type = "error"))
   })
 
   # ==================== 编辑人员、中心 功能 end ====================
@@ -5226,7 +5306,6 @@ server <- function(input, output, session) {
     }
     # 进度：09 表 progress 存 0-100
     progress_val <- if (is.null(input$edit_progress)) 0 else as.numeric(input$edit_progress)
-    importance_val <- if (is.null(input$edit_importance) || !nzchar(trimws(as.character(input$edit_importance)))) NA_character_ else trimws(as.character(input$edit_importance))
     auth <- current_user_auth()
     actor_name <- normalize_text(auth$name)
     if (is.na(actor_name)) actor_name <- normalize_text(auth$work_id)
@@ -5322,7 +5401,6 @@ server <- function(input, output, session) {
     ctx$planned_end_date <- pd_val
     ctx$actual_end_date <- ad_val
     ctx$progress <- progress_num / 100
-    ctx$importance <- importance_val
     ctx$remark_entries <- remark_df
     if (is_s09_task) ctx$samples <- sample_df
     task_edit_context(ctx)
@@ -5370,21 +5448,7 @@ server <- function(input, output, session) {
             )
           }
 
-          project_scalar <- list(merged = list(), conflicts = list(), changed_updates = list())
-          locked_project_row <- snapshot_project_row
-          if (!is.na(ctx$proj_row_id)) {
-            locked_project_row <- fetch_row_snapshot(conn, "04项目总表", ctx$proj_row_id, "重要紧急程度", lock = TRUE)
-            if (is.null(locked_project_row)) stop("所属项目不存在，无法更新重要紧急程度。")
-            project_scalar <- merge_scalar_fields(
-              snapshot_project_row,
-              locked_project_row,
-              list("重要紧急程度" = importance_val),
-              list(list(col = "重要紧急程度", label = "重要紧急程度", normalize = normalize_text)),
-              overwrite_conflicts = overwrite_conflicts
-            )
-          }
-
-          all_conflicts <- c(main_scalar$conflicts, note_merge$conflicts, sample_merge$conflicts, project_scalar$conflicts)
+          all_conflicts <- c(main_scalar$conflicts, note_merge$conflicts, sample_merge$conflicts)
           if (!isTRUE(overwrite_conflicts) && !isTRUE(allow_partial_save) && length(all_conflicts) > 0) {
             return(list(status = "conflict", conflicts = all_conflicts))
           }
@@ -5405,16 +5469,9 @@ server <- function(input, output, session) {
           if (length(updates_main) > 0) {
             execute_updates(conn, tbl, row_id, updates_main)
           }
-          if (!is.na(ctx$proj_row_id) && length(project_scalar$changed_updates) > 0) {
-            execute_updates(conn, "04项目总表", ctx$proj_row_id, project_scalar$changed_updates)
-          }
 
           new_main_row <- locked_main_row
           for (nm in names(updates_main)) new_main_row[[nm]] <- updates_main[[nm]]
-          new_project_row <- locked_project_row
-          if (!is.na(ctx$proj_row_id)) {
-            for (nm in names(project_scalar$changed_updates)) new_project_row[[nm]] <- project_scalar$changed_updates[[nm]]
-          }
 
           old_audit <- list(
             计划开始时间 = locked_main_row[[cm$planned_start]],
@@ -5432,10 +5489,6 @@ server <- function(input, output, session) {
             备注 = note_merge$merged,
             当前进度 = new_main_row[[cm$progress]]
           )
-          old_importance <- locked_project_row[["重要紧急程度"]]
-          new_importance <- new_project_row[["重要紧急程度"]]
-          old_audit[["重要紧急程度"]] <- old_importance
-          new_audit[["重要紧急程度"]] <- new_importance
           if (is_s09_task) {
             old_audit[["样本来源与数"]] <- parse_sample_df(locked_main_row[[sample_col]])
             new_audit[["样本来源与数"]] <- parse_sample_df(new_main_row[[sample_col]])
@@ -5464,7 +5517,7 @@ server <- function(input, output, session) {
       insert_audit_log(pg_con,
         work_id = auth$work_id, name = auth$name,
         op_type = "update_stage", target_table = tbl, target_row_id = row_id,
-        biz_desc = "阶段时间与进度", summary = "修改阶段时间、进度、备注与重要紧急程度",
+        biz_desc = "阶段时间与进度", summary = "修改阶段时间、进度、备注",
         old_val = result$old_audit, new_val = result$new_audit, remark = NULL
       )
       ctx$snapshot_row <- tryCatch(fetch_row_snapshot(pg_con, tbl, row_id, main_cols, lock = FALSE), error = function(e) ctx$snapshot_row)
@@ -5476,7 +5529,6 @@ server <- function(input, output, session) {
       ctx$planned_end_date <- pd_val
       ctx$actual_end_date <- ad_val
       ctx$progress <- progress_num / 100
-      ctx$importance <- importance_val
       ctx$remark <- ctx$snapshot_row[[ctx$note_col]]
       ctx$remark_entries <- fetch_11_feedback_df(pg_con, row_id)
       ctx$snapshot_feedback_map <- fetch_11_feedback_map(pg_con, row_id)
@@ -5525,35 +5577,16 @@ server <- function(input, output, session) {
         overwrite_conflicts = FALSE
       )
     }
-    pre_project_conflicts <- list()
-    pre_project_merge_labels <- character(0)
-    current_project_row <- NULL
-    if (!is.na(ctx$proj_row_id)) {
-      current_project_row <- tryCatch(fetch_row_snapshot(pg_con, "04项目总表", ctx$proj_row_id, "重要紧急程度", lock = FALSE), error = function(e) NULL)
-      if (!is.null(current_project_row)) {
-        pre_project_merge <- merge_scalar_fields(
-          snapshot_project_row,
-          current_project_row,
-          list("重要紧急程度" = importance_val),
-          list(list(col = "重要紧急程度", label = "重要紧急程度", normalize = normalize_text)),
-          overwrite_conflicts = FALSE
-        )
-        pre_project_conflicts <- pre_project_merge$conflicts
-        pre_project_merge_labels <- pre_project_merge$changed_labels
-      }
-    }
-    pre_conflicts <- c(pre_main_scalar$conflicts, pre_note_merge$conflicts, pre_sample_merge$conflicts, pre_project_conflicts)
+    pre_conflicts <- c(pre_main_scalar$conflicts, pre_note_merge$conflicts, pre_sample_merge$conflicts)
     stale_any <- state_changed(snapshot_main_row, current_main_row) ||
       !identical(sort_feedback_map(ctx$snapshot_feedback_map %||% list()), fetch_11_feedback_map(pg_con, row_id)) ||
-      (is_s09_task && state_changed(snapshot_sample_map, parse_sample_map(current_main_row[[sample_col]]))) ||
-      (!is.null(current_project_row) && state_changed(snapshot_project_row, current_project_row))
+      (is_s09_task && state_changed(snapshot_sample_map, parse_sample_map(current_main_row[[sample_col]])))
     auto_merge_items <- character(0)
     if (stale_any) {
       auto_merge_items <- c(
         pre_main_scalar$changed_labels,
         format_json_auto_merge_items("问题/卡点/经验分享", pre_note_merge$changed_keys),
-        if (is_s09_task) format_json_auto_merge_items("样本来源与数", pre_sample_merge$changed_keys) else character(0),
-        pre_project_merge_labels
+        if (is_s09_task) format_json_auto_merge_items("样本来源与数", pre_sample_merge$changed_keys) else character(0)
       )
     }
     if (length(pre_conflicts) > 0) {
@@ -5655,6 +5688,7 @@ server <- function(input, output, session) {
                       selectInput("mtg_new_filter_manager", "项目负责人", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                       selectInput("mtg_new_filter_participant", "项目参与人员", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                       selectInput("mtg_new_filter_importance", "重要紧急程度", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
+                      selectInput("mtg_new_filter_research_group", "课题组", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                       selectInput("mtg_new_filter_hospital", "相关医院（有中心）", choices = character(0), multiple = TRUE, selectize = TRUE, width = "100%"),
                       div(
                         style = "margin-top: 6px; font-size: 14px;",
@@ -6219,8 +6253,9 @@ server <- function(input, output, session) {
     site_name_from_group <- sub("^[^_]+_", "", task_info$group)
     is_sync <- grepl("同步阶段", task_info$group)
 
-    # 获取原始甘特数据行
-    gd <- current_gantt_data()
+    # 获取原始甘特数据行（用 all_stages 避免主 tab 筛选器干扰）
+    gd <- gantt_data_all_stages()
+    if (is.null(gd) || nrow(gd) == 0) gd <- current_gantt_data()
     ss <- sc$sync_stages
     if (is_sync) {
       original_task <- gd %>%
@@ -6238,8 +6273,8 @@ server <- function(input, output, session) {
     if (nrow(original_task) == 0) return
 
     today <- today_beijing()
-    planned_end_date <- original_task$planned_end_date
-    actual_end_date  <- original_task$actual_end_date
+    planned_end_date <- original_task$planned_end_date[1]
+    actual_end_date  <- original_task$actual_end_date[1]
     is_unplanned <- if ("is_unplanned" %in% names(original_task)) isTRUE(original_task$is_unplanned[1]) else FALSE
     start_for_calc <- as.Date(task_info$start)
     proj_row_id <- if ("proj_row_id" %in% names(original_task)) original_task$proj_row_id[1] else NA_integer_

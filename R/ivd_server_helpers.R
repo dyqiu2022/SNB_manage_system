@@ -1756,7 +1756,8 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
   if (is.null(auth) || isTRUE(auth$allow_none)) {
     return(list(
       types = character(0), names = character(0), managers = character(0),
-      participants = character(0), importance = character(0), hospitals = character(0)
+      participants = character(0), importance = character(0), hospitals = character(0),
+      research_groups = character(0)
     ))
   }
   and_04 <- if (auth$allow_all) "" else paste0(" AND id IN (", auth$allowed_subquery, ")")
@@ -1770,6 +1771,7 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
     participants <- character(0)
     importance <- character(0)
     hospitals <- character(0)
+    research_groups <- character(0)
     t1 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "项目类型" AS v FROM public."04项目总表" WHERE "项目类型" IS NOT NULL', and_04, " ORDER BY 1"))
     if (nrow(t1) > 0) types <- as.character(t1$v)
     t2 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "项目名称" AS v FROM public."04项目总表" WHERE "项目名称" IS NOT NULL', and_04, " ORDER BY 1"))
@@ -1785,13 +1787,16 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
     if (nrow(t5) > 0) importance <- as.character(t5$v)
     t6 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT h."医院名称" AS v FROM public."01医院信息表" h INNER JOIN public."03医院_项目表" s ON s."01_hos_resource_table医院信息表_id" = h.id WHERE h."医院名称" IS NOT NULL', and_s, " ORDER BY 1"))
     if (nrow(t6) > 0) hospitals <- as.character(t6$v)
+    t7 <- DBI::dbGetQuery(conn, paste0('SELECT DISTINCT "课题组" AS v FROM public."04项目总表" WHERE "课题组" IS NOT NULL', and_04, " ORDER BY 1"))
+    if (nrow(t7) > 0) research_groups <- as.character(t7$v)
     list(
       types = types,
       names = names_,
       managers = managers,
       participants = participants,
       importance = importance,
-      hospitals = hospitals
+      hospitals = hospitals,
+      research_groups = research_groups
     )
   }, error = function(e) NULL)
 }
@@ -1799,7 +1804,7 @@ fetch_gantt_dim_filter_options <- function(conn, auth) {
 #' 按甘特相同维度在 v_项目阶段甘特视图_全部 上筛出 04 项目 id；无维度子句时返回 NULL（调用方用全量 choices）
 meeting_new_project_ids_by_gantt_dims <- function(
     conn, auth,
-    ft, fn, fm, fp, fi, fh,
+    ft, fn, fm, fp, fi, fh, fg,
     include_archived,
     combine_mode = c("and", "or")) {
   combine_mode <- match.arg(combine_mode)
@@ -1824,7 +1829,12 @@ meeting_new_project_ids_by_gantt_dims <- function(
     qh <- paste0('SELECT DISTINCT s."project_table 项目总表_id" FROM public."03医院_项目表" s INNER JOIN public."01医院信息表" h ON s."01_hos_resource_table医院信息表_id" = h.id WHERE h."医院名称" IN (', paste(rep("$", length(fh)), seq_along(fh), sep = "", collapse = ","), ")")
     proj_ids_hosp <- DBI::dbGetQuery(conn, qh, params = as.list(fh))[["project_table 项目总表_id"]]
   }
-  dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp)
+  proj_ids_rg <- integer(0)
+  if (length(fg) > 0L) {
+    qrg <- paste0('SELECT id FROM public."04项目总表" WHERE "课题组" IN (', paste(rep("$", length(fg)), seq_along(fg), sep = "", collapse = ","), ")")
+    proj_ids_rg <- DBI::dbGetQuery(conn, qrg, params = as.list(fg))$id
+  }
+  dim_built <- build_gantt_filter_dimension_parts(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp, proj_ids_rg)
   if (length(dim_built$dim_parts) == 0L) return(NULL)
   include_archived_sql <- if (isTRUE(include_archived)) "TRUE" else "COALESCE(g.project_is_active, true) = true"
   auth_sql <- if (auth$allow_all) {
@@ -2007,7 +2017,7 @@ format_json_auto_merge_items <- function(field_label, keys) {
 # ---------- 甘特 SQL 筛选维度 / 行整理（原 server 内，每会话重复构造闭包；依赖 norm_progress，须在 app.R 定义 norm_progress 后 source 本文件） ----------
 
 # 甘特筛选：各维度子句列表；combine_mode 为 or 时用 OR 包成一组，为 and 时逐项 AND。同一维度内多选为 IN。与权限、归档条件仍为 AND。
-build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp) {
+build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids_participant, proj_ids_hosp, proj_ids_rg = integer(0)) {
   p <- 0L
   or_parts <- character(0)
   params_stage <- list()
@@ -2048,6 +2058,12 @@ build_gantt_filter_dimension_parts <- function(ft, fn, fi, manager_ids, proj_ids
     ph <- make_ph(length(proj_ids_hosp), p + 1L)
     or_parts <- c(or_parts, sprintf("project_db_id IN (%s)", ph))
     params_stage <- c(params_stage, as.list(proj_ids_hosp))
+    p <- p + length(proj_ids_hosp)
+  }
+  if (length(proj_ids_rg) > 0L) {
+    ph <- make_ph(length(proj_ids_rg), p + 1L)
+    or_parts <- c(or_parts, sprintf("project_db_id IN (%s)", ph))
+    params_stage <- c(params_stage, as.list(proj_ids_rg))
   }
   list(dim_parts = or_parts, params_stage = params_stage)
 }
