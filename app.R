@@ -553,6 +553,13 @@ ui <- fluidPage(
         if (!sid) return;
         Shiny.onInputChange('msg_stage_clicked', sid + '_' + Date.now());
       });
+      // 修改项目基础信息：删除中心按钮事件委托
+      $(document).on('click', '.pc-del-center-btn', function(e) {
+        e.preventDefault();
+        var id = $(this).attr('data-id');
+        if (!id) return;
+        Shiny.onInputChange('pc_del_center_trigger', id + '_' + Date.now());
+      });
     ")),
     tags$style(HTML("
       /* 紧凑进度条与里程碑控件：让 item 高度贴近内部文字，节省纵向空间 */
@@ -4234,7 +4241,8 @@ server <- function(input, output, session) {
         id = "pc_tabs",
         tabPanel("参与人员管理", value = "tab_personnel", uiOutput("pc_personnel_ui")),
         tabPanel("临床中心管理", value = "tab_center",    uiOutput("pc_center_ui")),
-        tabPanel("修改项目名称/课题组/重要紧急程度", value = "tab_proj_name", uiOutput("pc_proj_name_ui"))
+        tabPanel("修改项目名称/课题组/重要紧急程度", value = "tab_proj_name", uiOutput("pc_proj_name_ui")),
+        tabPanel("其他", value = "tab_other", uiOutput("pc_other_ui"))
       )
     ))
   })
@@ -4717,15 +4725,24 @@ server <- function(input, output, session) {
         if (nrow(linked) == 0) {
           tags$p("（暂无关联中心）", style = "color:#999;")
         } else {
-          tags$ul(lapply(seq_len(nrow(linked)), function(i) {
-            nm <- linked[["医院名称"]][i]
-            tags$li(if (is.na(nm) || !nzchar(trimws(as.character(nm))))
-              paste0("（医院名称未填，link_id=", linked$link_id[i], "）") else as.character(nm))
-          }))
+          tags$ul(style = "list-style: none; padding-left: 0;",
+            lapply(seq_len(nrow(linked)), function(i) {
+              nm <- linked[["医院名称"]][i]
+              display_nm <- if (is.na(nm) || !nzchar(trimws(as.character(nm))))
+                paste0("（医院名称未填，link_id=", linked$link_id[i], "）") else as.character(nm)
+              tags$li(style = "margin-bottom: 4px;",
+                tags$span(display_nm),
+                tags$a(href = "#", class = "pc-del-center-btn",
+                  `data-id` = as.character(linked$link_id[i]),
+                  style = "margin-left:8px; color:#dc3545; font-size:0.85em; text-decoration:none;",
+                  "删除")
+              )
+            })
+          )
         },
         tags$hr(),
         tags$p(tags$b("新增临床中心："),
-               tags$small("（只可新增，不支持删除；触发器将自动维护 09 阶段实例）"),
+               tags$small("（触发器将自动维护 09 阶段实例）"),
                style = "margin-bottom:6px;"),
         if (length(avail_choices) == 0) {
           tags$p("（所有医院已关联本项目，无可新增中心）", style = "color:#999;")
@@ -4786,6 +4803,78 @@ server <- function(input, output, session) {
       gantt_use_incremental(TRUE)
       gantt_force_refresh(gantt_force_refresh() + 1L)
     }, error = function(e) showNotification(paste0("新增中心失败：", conditionMessage(e)), type = "error"))
+  })
+
+  # ---------- Tab2: 删除中心（事件委托 → 确认弹窗） ----------
+  observeEvent(input$pc_del_center_trigger, {
+    raw <- input$pc_del_center_trigger
+    link_id <- suppressWarnings(as.integer(sub("_.*$", "", as.character(raw))))
+    if (is.na(link_id)) return()
+    ctx <- personnel_center_context()
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    tryCatch({
+      center_row <- DBI::dbGetQuery(pg_con,
+        'SELECT t03."01_hos_resource_table医院信息表_id", h."医院名称" FROM public."03医院_项目表" t03 LEFT JOIN public."01医院信息表" h ON h.id = t03."01_hos_resource_table医院信息表_id" WHERE t03.id = $1',
+        params = list(link_id))
+      if (nrow(center_row) == 0) {
+        showNotification("未找到该中心关联记录。", type = "warning")
+        return()
+      }
+      center_name <- if (!is.na(center_row[["医院名称"]][1]) && nzchar(trimws(center_row[["医院名称"]][1])))
+        center_row[["医院名称"]][1] else paste0("id=", link_id)
+      session$userData$pending_del_center <- list(
+        link_id = link_id,
+        center_name = center_name
+      )
+      showModal(modalDialog(
+        title = "确认删除临床中心",
+        size = "m", easyClose = TRUE,
+        tags$div(
+          tags$p(sprintf("是否删除临床中心「%s」？", center_name)),
+          tags$p("删除后将移除该中心的所有阶段实例，但该中心的问题/卡点/项目要点将保留（不再关联具体阶段实例）。", style = "color:#666;")
+        ),
+        footer = tagList(
+          actionButton("btn_confirm_del_center", "确认删除", class = "btn-danger"),
+          modalButton("取消")
+        )
+      ))
+    }, error = function(e) showNotification(paste0("查询失败：", conditionMessage(e)), type = "error"))
+  })
+
+  observeEvent(input$btn_confirm_del_center, {
+    pending <- session$userData$pending_del_center
+    if (is.null(pending)) { removeModal(); return() }
+    auth <- current_user_auth()
+    ctx <- personnel_center_context()
+    if (!isTRUE(auth$can_manage_project) && !is_current_user_project_manager(ctx$proj_row_id)) { removeModal(); return() }
+    req(!is.null(pg_con), DBI::dbIsValid(pg_con))
+    link_id <- pending$link_id
+    center_name <- pending$center_name
+    session$userData$pending_del_center <- NULL
+    removeModal()
+    tryCatch({
+      pool::poolWithTransaction(pg_con, function(conn) {
+        # 1. 断开 11→09 关联（保留 11 行，置 NULL）
+        DBI::dbExecute(conn,
+          'UPDATE public."11阶段问题反馈表" SET "09项目阶段实例表_id" = NULL WHERE "09项目阶段实例表_id" IN (SELECT id FROM public."09项目阶段实例表" WHERE site_project_id = $1)',
+          params = list(link_id))
+        # 2. 删除 03 行 → CASCADE 自动删除关联 09 行（site_project_id FK）
+        DBI::dbExecute(conn,
+          'DELETE FROM public."03医院_项目表" WHERE id = $1',
+          params = list(link_id))
+      })
+      insert_audit_log(
+        pg_con, auth$work_id, auth$name,
+        "DELETE", "03医院_项目表", link_id,
+        sprintf("项目 %s 删除临床中心 %s", ctx$project_id, center_name),
+        sprintf("删除中心 link_id=%d (%s)", link_id, center_name),
+        NULL, NULL
+      )
+      showNotification(sprintf("已删除临床中心：%s", center_name), type = "message")
+      pc_center_refresh(pc_center_refresh() + 1L)
+      gantt_use_incremental(TRUE)
+      gantt_force_refresh(gantt_force_refresh() + 1L)
+    }, error = function(e) showNotification(paste0("删除中心失败：", conditionMessage(e)), type = "error"))
   })
 
   # ---------- Tab3: 修改项目名称 / 课题组 / 重要紧急程度 ----------
@@ -4924,6 +5013,88 @@ server <- function(input, output, session) {
       gantt_use_incremental(TRUE)
       gantt_force_refresh(gantt_force_refresh() + 1L)
     }, error = function(e) showNotification(paste0("保存失败：", conditionMessage(e)), type = "error"))
+  })
+
+  # ---------- Tab4: 其他（删除项目） ----------
+  output$pc_other_ui <- renderUI({
+    ctx <- personnel_center_context()
+    req(ctx)
+    tagList(
+      tags$div(style = "padding: 15px; border: 1px solid #dee2e6; border-radius: 5px;",
+        tags$h4("危险操作", style = "color: #dc3545;"),
+        tags$p("以下操作不可撤销，请谨慎执行。"),
+        tags$hr(),
+        actionButton("btn_delete_project", "删除项目",
+                     class = "btn-danger",
+                     style = "background-color: #dc3545; color: white;"),
+        tags$span(" 删除后该项目所有信息将无法恢复", style = "color: #999;")
+      )
+    )
+  })
+
+  observeEvent(input$btn_delete_project, {
+    ctx <- personnel_center_context()
+    req(ctx)
+    auth <- current_user_auth()
+    if (!isTRUE(auth$can_manage_project) && !is_current_user_project_manager(ctx$proj_row_id)) return()
+    showModal(modalDialog(
+      title = "确认删除项目",
+      size = "m", easyClose = FALSE,
+      tags$div(
+        tags$p(strong("是否删除项目？该操作会删除关于该项目的所有信息，包括项目要点、会议记录、个人贡献等所有内容。")),
+        tags$p("此操作不可撤销。", style = "color: #dc3545;")
+      ),
+      footer = tagList(
+        actionButton("btn_delete_project_confirm", "确定", class = "btn-danger"),
+        modalButton("取消")
+      )
+    ))
+  })
+
+  observeEvent(input$btn_delete_project_confirm, {
+    auth <- current_user_auth()
+    ctx <- personnel_center_context()
+    if (!isTRUE(auth$can_manage_project) && !is_current_user_project_manager(ctx$proj_row_id)) { removeModal(); return() }
+    req(ctx, !is.null(pg_con), DBI::dbIsValid(pg_con))
+    proj_id <- as.integer(ctx$proj_row_id)
+    proj_name <- ctx$project_id
+    removeModal()
+    tryCatch({
+      pool::poolWithTransaction(pg_con, function(conn) {
+        # 1. 删除人员关联（_nc_m2m）
+        DBI::dbExecute(conn,
+          'DELETE FROM public."_nc_m2m_04项目总表_05人员表" WHERE "04项目总表_id" = $1',
+          params = list(proj_id))
+        # 2. 处理项目级 11 行（09项目阶段实例_id IS NULL，不被 CASCADE 覆盖）
+        DBI::dbExecute(conn,
+          'DELETE FROM public."12会议决策关联问题表" WHERE "11阶段问题反馈表_id" IN (SELECT id FROM public."11阶段问题反馈表" WHERE "04项目总表_id" = $1 AND "09项目阶段实例表_id" IS NULL)',
+          params = list(proj_id))
+        DBI::dbExecute(conn,
+          'DELETE FROM public."11阶段问题反馈表" WHERE "04项目总表_id" = $1 AND "09项目阶段实例表_id" IS NULL',
+          params = list(proj_id))
+        # 3. 删除 03 行 → CASCADE: 09(site_project_id) → 11 → 12
+        DBI::dbExecute(conn,
+          'DELETE FROM public."03医院_项目表" WHERE "project_table 项目总表_id" = $1',
+          params = list(proj_id))
+        # 4. 删除 04 行 → CASCADE: 09(project_id) → 11 → 12
+        DBI::dbExecute(conn,
+          'DELETE FROM public."04项目总表" WHERE id = $1',
+          params = list(proj_id))
+        # 5. 清理孤立的 10 行（不再有任何 12 关联的会议决策）
+        DBI::dbExecute(conn,
+          'DELETE FROM public."10会议决策表" WHERE id NOT IN (SELECT DISTINCT "10会议决策表_id" FROM public."12会议决策关联问题表")')
+      })
+      insert_audit_log(
+        pg_con, auth$work_id, auth$name,
+        "DELETE", "04项目总表", proj_id,
+        sprintf("删除项目 %s 及其所有关联数据", proj_name),
+        sprintf("级联删除项目 id=%d (%s)，含 03/09/11/12 关联行及孤立10行", proj_id, proj_name),
+        NULL, NULL
+      )
+      showNotification(sprintf("项目「%s」已删除。", proj_name), type = "message")
+      gantt_use_incremental(TRUE)
+      gantt_force_refresh(gantt_force_refresh() + 1L)
+    }, error = function(e) showNotification(paste0("删除项目失败：", conditionMessage(e)), type = "error"))
   })
 
   # ==================== 编辑人员、中心 功能 end ====================
